@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "comfyui-sam3-better-segmentation"
 description = "ComfyUI custom nodes for Meta SAM3 image segmentation with text prompts, point/box guidance, and Impact Pack SEGS output."
@@ -23,6 +27,12 @@ dependencies = [
     "numpy>=1.26,<1.28",
     "tqdm>=4.65.0",
     "transformers>=4.40.0,<5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0",
+    "ruff>=0.15",
 ]
 
 [project.urls]

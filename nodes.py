@@ -9,17 +9,8 @@ import os
 
 import torch
 
-from sam3_utils import (
-    comfy_image_to_pil,
-    masks_to_comfy_mask,
-    offload_model_if_needed,
-    pil_to_comfy_image,
-    run_sam3_inference,
-    tensor_to_list,
-    visualize_masks_on_image,
-)
+import folder_paths
 
-# Impact-Pack style MASK -> SEGS helper (your file in same folder)
 from .lib import mask_filters, mask_ops, prompt_handler
 from .lib import types as lib_types
 from .lib.conditioning_wrapper import ConditioningOverrideWrapper
@@ -31,12 +22,21 @@ from .lib.florence2_captioner import (
     crop_seg_bbox,
 )
 from .lib.masktosegs import SEG
+from .lib.model_manager import download_sam3_model, get_available_models, get_model_path
+from .lib.sam3_utils import (
+    comfy_image_to_pil,
+    masks_to_comfy_mask,
+    offload_model_if_needed,
+    pil_to_comfy_image,
+    run_sam3_inference,
+    tensor_to_list,
+    visualize_masks_on_image,
+)
 from .lib.segs_builder import (
     build_combined_segs,
     build_detection_segs,
     build_overlapping_segs,
 )
-from .model_manager import download_sam3_model, get_available_models, get_model_path
 from .sam3_lib.model.sam3_image_processor import Sam3Processor
 from .sam3_lib.model_builder import build_sam3_image_model
 
@@ -56,7 +56,7 @@ class SAM3BSModelLoaderAndDownloader:
     def INPUT_TYPES(cls):
         # List known local models from model_manager
         # get_available_models() returns ["auto (download from HuggingFace)", <files...>]
-        available = get_available_models()
+        available = get_available_models(models_dir=folder_paths.models_dir)
         # Present clearer choices in UI
         model_sources = (
             [
@@ -91,7 +91,7 @@ class SAM3BSModelLoaderAndDownloader:
 
         elif model_source == "local (auto-download)":
             # Download only sam3.pt into models/sam3
-            sam3_dir = download_sam3_model(hf_repo)  # returns models/sam3
+            sam3_dir = download_sam3_model(hf_repo, models_dir=folder_paths.models_dir)
             checkpoint_path = os.path.join(sam3_dir, "sam3.pt")
             if not os.path.isfile(checkpoint_path):
                 raise RuntimeError(
@@ -101,7 +101,9 @@ class SAM3BSModelLoaderAndDownloader:
 
         else:
             # Specific local checkpoint chosen from list under models/sam3
-            checkpoint_path = get_model_path(model_source)
+            checkpoint_path = get_model_path(
+                model_source, models_dir=folder_paths.models_dir
+            )
             if not checkpoint_path or not os.path.isfile(checkpoint_path):
                 raise RuntimeError(
                     f"[SAM3BSModelLoaderAndDownloader] Local model file not found: {model_source} -> {checkpoint_path}"
