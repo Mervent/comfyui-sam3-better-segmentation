@@ -2,6 +2,7 @@ import pytest
 
 from lib.geometry import (
     UnionFind,
+    bboxes_overlap,
     compute_iou,
     denormalize_boxes,
     denormalize_points,
@@ -112,3 +113,24 @@ def test_max_iou_with_boxes() -> None:
     result = max_iou_with_boxes(detection_box, prompt_boxes)
 
     assert result == pytest.approx(expected)
+
+
+def test_bboxes_overlap_identical() -> None:
+    """Identical bboxes overlap."""
+    bbox = (0, 0, 10, 10)
+
+    assert bboxes_overlap(bbox, bbox) is True
+
+
+def test_bboxes_overlap_partial() -> None:
+    """Partially overlapping bboxes return True."""
+    result = bboxes_overlap((0, 0, 10, 10), (5, 5, 15, 15))
+
+    assert result is True
+
+
+def test_bboxes_overlap_disjoint() -> None:
+    """Non-overlapping bboxes return False."""
+    result = bboxes_overlap((0, 0, 10, 10), (20, 20, 30, 30))
+
+    assert result is False

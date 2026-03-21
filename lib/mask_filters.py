@@ -56,22 +56,43 @@ def filter_by_density(
     """Remove masks where foreground_pixels / bbox_area is below min_density."""
     if min_density > 0.0 and masks is not None and masks.numel() > 0:
         masks_flat = normalize_masks(masks)
-        kept: list[int] = []
+        binary = (masks_flat > 0.5).float()
 
-        for i in range(masks_flat.shape[0]):
-            ys, xs = torch.where(masks_flat[i] > 0.5)
-            if len(ys) == 0:
+        # Compute density for each mask using torch ops
+        keep_indices_list: list[int] = []
+
+        for i in range(binary.shape[0]):
+            mask_binary = binary[i]
+            fg_count = mask_binary.sum().item()
+
+            # Skip empty masks
+            if fg_count == 0:
                 continue
-            fg = len(ys)
-            bbox_area = (xs.max() - xs.min() + 1).item() * (
-                ys.max() - ys.min() + 1
-            ).item()
-            density = fg / bbox_area
-            if density >= min_density:
-                kept.append(i)
 
-        if kept:
-            keep_indices = torch.tensor(kept, dtype=torch.long, device=masks.device)
+            # Find bounding box of nonzero pixels
+            rows_with_pixels = mask_binary.any(dim=1).nonzero(as_tuple=False).view(-1)
+            cols_with_pixels = mask_binary.any(dim=0).nonzero(as_tuple=False).view(-1)
+
+            if rows_with_pixels.numel() == 0 or cols_with_pixels.numel() == 0:
+                continue
+
+            row_min = rows_with_pixels[0].item()
+            row_max = rows_with_pixels[-1].item()
+            col_min = cols_with_pixels[0].item()
+            col_max = cols_with_pixels[-1].item()
+
+            bbox_h = row_max - row_min + 1
+            bbox_w = col_max - col_min + 1
+            bbox_area = bbox_h * bbox_w
+
+            density = fg_count / bbox_area
+            if density >= min_density:
+                keep_indices_list.append(i)
+
+        if keep_indices_list:
+            keep_indices = torch.tensor(
+                keep_indices_list, dtype=torch.long, device=masks.device
+            )
             masks = masks[keep_indices]
             boxes = _index(boxes, keep_indices)
             scores = _index(scores, keep_indices)
@@ -149,4 +170,22 @@ def limit_detections(
             boxes = _index(boxes, top_indices)
             scores = _index(scores, top_indices)
 
+    return masks, boxes, scores
+
+
+def run_filter_pipeline(
+    masks: torch.Tensor | None,
+    boxes: torch.Tensor | None,
+    scores: torch.Tensor | None,
+    steps: list[tuple],
+) -> _Triplet:
+    """Chain filter steps with short-circuit on None.
+
+    Each step is (filter_fn, args_tuple); called as filter_fn(masks, boxes, scores, *args_tuple).
+    Returns (None, None, None) immediately if any step produces masks=None.
+    """
+    for filter_fn, args_tuple in steps:
+        masks, boxes, scores = filter_fn(masks, boxes, scores, *args_tuple)
+        if masks is None:
+            return None, None, None
     return masks, boxes, scores

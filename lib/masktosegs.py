@@ -14,27 +14,27 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from collections import namedtuple
+import logging
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 import torch
 
-MAX_RESOLUTION = 4096  # Or set as needed
+logger = logging.getLogger(__name__)
 
-SEG = namedtuple(
-    "SEG",
-    [
-        "cropped_image",
-        "cropped_mask",
-        "confidence",
-        "crop_region",
-        "bbox",
-        "label",
-        "control_net_wrapper",
-    ],
-    defaults=[None],
-)
+
+@dataclass(frozen=True)
+class SEG:
+    """A single segmentation element in Impact Pack SEGS format."""
+
+    cropped_image: np.ndarray | None
+    cropped_mask: np.ndarray
+    confidence: float
+    crop_region: list[int]
+    bbox: tuple[int, int, int, int]
+    label: str
+    control_net_wrapper: object | None = None
 
 
 def normalize_region(limit, startp, size):
@@ -81,6 +81,131 @@ def make_2d_mask(mask):
     return mask
 
 
+def _segs_from_combined(
+    mask_2d,
+    crop_factor,
+    bbox_fill,
+    label,
+    crop_min_size,
+    detailer_hook,
+) -> list[SEG]:
+    """Return a list of SEGs for the combined (single-bbox) path."""
+    segs: list[SEG] = []
+    indices = np.nonzero(mask_2d)
+    if len(indices[0]) == 0 or len(indices[1]) == 0:
+        return segs
+    bbox = (
+        np.min(indices[1]),
+        np.min(indices[0]),
+        np.max(indices[1]),
+        np.max(indices[0]),
+    )
+    crop_region = make_crop_region(
+        mask_2d.shape[1], mask_2d.shape[0], bbox, crop_factor
+    )
+    x1, y1, x2, y2 = crop_region
+    if detailer_hook is not None:
+        crop_region = detailer_hook.post_crop_region(
+            mask_2d.shape[1], mask_2d.shape[0], bbox, crop_region
+        )
+    if x2 - x1 > 0 and y2 - y1 > 0:
+        cropped_mask = mask_2d[y1:y2, x1:x2]
+        if bbox_fill:
+            bx1, by1, bx2, by2 = bbox
+            cropped_mask = cropped_mask.copy()
+            cropped_mask[by1:by2, bx1:bx2] = 1.0
+        if cropped_mask is not None:
+            segs.append(
+                SEG(
+                    cropped_image=None,
+                    cropped_mask=cropped_mask,
+                    confidence=1.0,
+                    crop_region=crop_region,
+                    bbox=bbox,
+                    label=label,
+                    control_net_wrapper=None,
+                )
+            )
+    return segs
+
+
+def _segs_from_contours(
+    mask_2d,
+    crop_factor,
+    bbox_fill,
+    drop_size,
+    label,
+    crop_min_size,
+    detailer_hook,
+    is_contour,
+) -> list[SEG]:
+    """Return a list of SEGs for the contour-split path."""
+    segs: list[SEG] = []
+    mask_i_uint8 = (mask_2d * 255.0).astype(np.uint8)
+    try:
+        # OpenCV 4.x style
+        contours, ctree = cv2.findContours(
+            mask_i_uint8, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+        )
+    except ValueError:
+        # OpenCV 3.x style
+        _, contours, ctree = cv2.findContours(
+            mask_i_uint8, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+        )
+    if ctree is None or len(contours) == 0:
+        return segs
+    for j, contour in enumerate(contours):
+        hierarchy = ctree[0][j]
+        if hierarchy[3] != -1:
+            continue
+        separated_mask = np.zeros_like(mask_i_uint8)
+        cv2.drawContours(separated_mask, [contour], 0, 255, -1)
+        separated_mask = np.array(separated_mask / 255.0).astype(np.float32)
+        x, y, w, h = cv2.boundingRect(contour)
+        bbox = x, y, x + w, y + h
+        crop_region = make_crop_region(
+            mask_2d.shape[1], mask_2d.shape[0], bbox, crop_factor, crop_min_size
+        )
+        if detailer_hook is not None:
+            crop_region = detailer_hook.post_crop_region(
+                mask_2d.shape[1], mask_2d.shape[0], bbox, crop_region
+            )
+        if w > drop_size and h > drop_size:
+            if is_contour:
+                mask_src = separated_mask
+            else:
+                mask_src = mask_2d * separated_mask
+            cropped_mask = np.array(
+                mask_src[
+                    crop_region[1] : crop_region[3],
+                    crop_region[0] : crop_region[2],
+                ]
+            )
+            if bbox_fill:
+                cx1, cy1, _, _ = crop_region
+                bx1 = x - cx1
+                bx2 = x + w - cx1
+                by1 = y - cy1
+                by2 = y + h - cy1
+                cropped_mask[by1:by2, bx1:bx2] = 1.0
+            if cropped_mask is not None:
+                cropped_mask = torch.clip(
+                    torch.from_numpy(cropped_mask), 0, 1.0
+                ).numpy()
+                segs.append(
+                    SEG(
+                        cropped_image=None,
+                        cropped_mask=cropped_mask,
+                        confidence=1.0,
+                        crop_region=crop_region,
+                        bbox=bbox,
+                        label=label,
+                        control_net_wrapper=None,
+                    )
+                )
+    return segs
+
+
 def mask_to_segs(
     mask,
     combined,
@@ -94,123 +219,46 @@ def mask_to_segs(
 ):
     drop_size = max(drop_size, 1)
     if mask is None:
-        print("[mask_to_segs] Cannot operate: MASK is empty.")
+        logger.warning("Cannot operate: MASK is empty.")
         return (0, 0), []
-    if isinstance(mask, np.ndarray):
-        pass
-    else:
+    if not isinstance(mask, np.ndarray):
         try:
             mask = mask.numpy()
         except AttributeError:
-            print("[mask_to_segs] Cannot operate: MASK is not a NumPy array or Tensor.")
+            logger.warning("Cannot operate: MASK is not a NumPy array or Tensor.")
             return (0, 0), []
-    if mask is None:
-        print("[mask_to_segs] Cannot operate: MASK is empty.")
-        return (0, 0), []
-    result = []
+    result: list[SEG] = []
 
     if len(mask.shape) == 2:
         mask = np.expand_dims(mask, axis=0)
     for i in range(mask.shape[0]):
         mask_i = mask[i]
         if combined:
-            indices = np.nonzero(mask_i)
-            if len(indices[0]) > 0 and len(indices[1]) > 0:
-                bbox = (
-                    np.min(indices[1]),
-                    np.min(indices[0]),
-                    np.max(indices[1]),
-                    np.max(indices[0]),
+            result.extend(
+                _segs_from_combined(
+                    mask_2d=mask_i,
+                    crop_factor=crop_factor,
+                    bbox_fill=bbox_fill,
+                    label=label,
+                    crop_min_size=crop_min_size,
+                    detailer_hook=detailer_hook,
                 )
-                crop_region = make_crop_region(
-                    mask_i.shape[1], mask_i.shape[0], bbox, crop_factor
-                )
-                x1, y1, x2, y2 = crop_region
-                if detailer_hook is not None:
-                    crop_region = detailer_hook.post_crop_region(
-                        mask_i.shape[1], mask_i.shape[0], bbox, crop_region
-                    )
-                if x2 - x1 > 0 and y2 - y1 > 0:
-                    cropped_mask = mask_i[y1:y2, x1:x2]
-                    if bbox_fill:
-                        bx1, by1, bx2, by2 = bbox
-                        cropped_mask = cropped_mask.copy()
-                        cropped_mask[by1:by2, bx1:bx2] = 1.0
-                    if cropped_mask is not None:
-                        item = SEG(
-                            cropped_image=None,
-                            cropped_mask=cropped_mask,
-                            confidence=1.0,
-                            crop_region=crop_region,
-                            bbox=bbox,
-                            label=label,
-                            control_net_wrapper=None,
-                        )
-                        result.append(item)
+            )
         else:
-            mask_i_uint8 = (mask_i * 255.0).astype(np.uint8)
-            try:
-                # OpenCV 4.x style
-                contours, ctree = cv2.findContours(
-                    mask_i_uint8, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+            result.extend(
+                _segs_from_contours(
+                    mask_2d=mask_i,
+                    crop_factor=crop_factor,
+                    bbox_fill=bbox_fill,
+                    drop_size=drop_size,
+                    label=label,
+                    crop_min_size=crop_min_size,
+                    detailer_hook=detailer_hook,
+                    is_contour=is_contour,
                 )
-            except ValueError:
-                # OpenCV 3.x style
-                _, contours, ctree = cv2.findContours(
-                    mask_i_uint8, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
-                )
-            if ctree is None or len(contours) == 0:
-                continue
-            for j, contour in enumerate(contours):
-                hierarchy = ctree[0][j]
-                if hierarchy[3] != -1:
-                    continue
-                separated_mask = np.zeros_like(mask_i_uint8)
-                cv2.drawContours(separated_mask, [contour], 0, 255, -1)
-                separated_mask = np.array(separated_mask / 255.0).astype(np.float32)
-                x, y, w, h = cv2.boundingRect(contour)
-                bbox = x, y, x + w, y + h
-                crop_region = make_crop_region(
-                    mask_i.shape[1], mask_i.shape[0], bbox, crop_factor, crop_min_size
-                )
-                if detailer_hook is not None:
-                    crop_region = detailer_hook.post_crop_region(
-                        mask_i.shape[1], mask_i.shape[0], bbox, crop_region
-                    )
-                if w > drop_size and h > drop_size:
-                    if is_contour:
-                        mask_src = separated_mask
-                    else:
-                        mask_src = mask_i * separated_mask
-                    cropped_mask = np.array(
-                        mask_src[
-                            crop_region[1] : crop_region[3],
-                            crop_region[0] : crop_region[2],
-                        ]
-                    )
-                    if bbox_fill:
-                        cx1, cy1, _, _ = crop_region
-                        bx1 = x - cx1
-                        bx2 = x + w - cx1
-                        by1 = y - cy1
-                        by2 = y + h - cy1
-                        cropped_mask[by1:by2, bx1:bx2] = 1.0
-                    if cropped_mask is not None:
-                        cropped_mask = torch.clip(
-                            torch.from_numpy(cropped_mask), 0, 1.0
-                        ).numpy()
-                        item = SEG(
-                            cropped_image=None,
-                            cropped_mask=cropped_mask,
-                            confidence=1.0,
-                            crop_region=crop_region,
-                            bbox=bbox,
-                            label=label,
-                            control_net_wrapper=None,
-                        )
-                        result.append(item)
+            )
     if not result:
-        print("SAM3BS Masked Attention Empty mask.")
+        logger.info("Empty mask.")
     else:
-        print(f"SAM3BS Masked Attention of Detected SEGS: {len(result)}")
+        logger.info(f"Detected SEGS: {len(result)}")
     return (mask.shape[1], mask.shape[2]), result

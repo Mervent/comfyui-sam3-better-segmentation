@@ -59,7 +59,7 @@ def crop_seg_bbox(
     crop_uint8 = (
         (crop.detach().cpu().float().numpy() * 255).clip(0, 255).astype(np.uint8)
     )
-    return Image.fromarray(crop_uint8, mode="RGB")
+    return Image.fromarray(crop_uint8)
 
 
 def bbox_crops_to_tensor(pil_images: list[Image.Image]) -> torch.Tensor:

@@ -1,5 +1,14 @@
 from typing import Any
 
+# Mode → set of pipeline keys to extract
+_MODE_KEYS: dict[str, set[str]] = {
+    "all": {"positive_boxes", "negative_boxes", "positive_points", "negative_points"},
+    "boxes_only": {"positive_boxes", "negative_boxes"},
+    "points_only": {"positive_points", "negative_points"},
+    "positive_only": {"positive_boxes", "positive_points"},
+    "negative_only": {"negative_boxes", "negative_points"},
+}
+
 
 def valid_block(block: Any, key: str) -> bool:
     """Check if block is a dict containing a truthy value for key."""
@@ -16,34 +25,23 @@ def extract_by_mode(
     positive_points = None
     negative_points = None
 
-    if pipeline_data is not None and mode != "disabled":
-        if not isinstance(pipeline_data, dict):
-            raise ValueError(
-                f"sam3_selectors_pipe must be a dictionary, got {type(pipeline_data)}"
-            )
+    if pipeline_data is None or mode == "disabled":
+        return positive_boxes, negative_boxes, positive_points, negative_points
 
-        pipeline_positive_boxes = pipeline_data.get("positive_boxes", None)
-        pipeline_negative_boxes = pipeline_data.get("negative_boxes", None)
-        pipeline_positive_points = pipeline_data.get("positive_points", None)
-        pipeline_negative_points = pipeline_data.get("negative_points", None)
+    if not isinstance(pipeline_data, dict):
+        raise ValueError(
+            f"sam3_selectors_pipe must be a dictionary, got {type(pipeline_data)}"
+        )
 
-        if mode == "all":
-            positive_boxes = pipeline_positive_boxes
-            negative_boxes = pipeline_negative_boxes
-            positive_points = pipeline_positive_points
-            negative_points = pipeline_negative_points
-        elif mode == "boxes_only":
-            positive_boxes = pipeline_positive_boxes
-            negative_boxes = pipeline_negative_boxes
-        elif mode == "points_only":
-            positive_points = pipeline_positive_points
-            negative_points = pipeline_negative_points
-        elif mode == "positive_only":
-            positive_boxes = pipeline_positive_boxes
-            positive_points = pipeline_positive_points
-        elif mode == "negative_only":
-            negative_boxes = pipeline_negative_boxes
-            negative_points = pipeline_negative_points
+    keys_to_extract = _MODE_KEYS.get(mode, set())
+    if "positive_boxes" in keys_to_extract:
+        positive_boxes = pipeline_data.get("positive_boxes", None)
+    if "negative_boxes" in keys_to_extract:
+        negative_boxes = pipeline_data.get("negative_boxes", None)
+    if "positive_points" in keys_to_extract:
+        positive_points = pipeline_data.get("positive_points", None)
+    if "negative_points" in keys_to_extract:
+        negative_points = pipeline_data.get("negative_points", None)
 
     return positive_boxes, negative_boxes, positive_points, negative_points
 

@@ -76,6 +76,11 @@ def point_inside_box(box: Sequence[float], points: Sequence[Sequence[float]]) ->
     return False
 
 
+def bboxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    """Return True if two [x1,y1,x2,y2] bboxes have overlapping area."""
+    return a[0] <= b[2] and a[2] >= b[0] and a[1] <= b[3] and a[3] >= b[1]
+
+
 class UnionFind:
     """Disjoint-set with path compression for grouping overlapping masks."""
 

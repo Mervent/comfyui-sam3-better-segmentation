@@ -3,10 +3,13 @@ SAM3 Utility Functions — tensor/image conversions and model device management.
 """
 
 import gc
+import logging
 
 import numpy as np
 import torch
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 def comfy_image_to_pil(image):
@@ -45,14 +48,7 @@ def masks_to_comfy_mask(masks):
 
 def visualize_masks_on_image(image, masks, boxes=None, scores=None, alpha=0.5):
     """Create visualization of masks overlaid on image."""
-    if isinstance(image, torch.Tensor):
-        image = comfy_image_to_pil(image)
-    elif isinstance(image, np.ndarray):
-        if image.max() <= 1.0:
-            image = Image.fromarray((image * 255).astype(np.uint8))
-        else:
-            image = Image.fromarray(image.astype(np.uint8))
-
+    image = comfy_image_to_pil(image)
     img_np = np.array(image).astype(np.float32) / 255.0
 
     if isinstance(masks, torch.Tensor):
@@ -60,7 +56,7 @@ def visualize_masks_on_image(image, masks, boxes=None, scores=None, alpha=0.5):
     else:
         masks_np = masks
 
-    np.random.seed(42)
+    rng = np.random.RandomState(42)
     overlay = img_np.copy()
 
     for i, mask in enumerate(masks_np):
@@ -74,7 +70,7 @@ def visualize_masks_on_image(image, masks, boxes=None, scores=None, alpha=0.5):
             )
             mask = np.array(mask_pil).astype(np.float32) / 255.0
 
-        color = np.random.rand(3)
+        color = rng.rand(3)
         for c in range(3):
             overlay[:, :, c] = np.where(
                 mask > 0.5,
@@ -96,8 +92,8 @@ def visualize_masks_on_image(image, masks, boxes=None, scores=None, alpha=0.5):
 
         for i, box in enumerate(boxes_np):
             x0, y0, x1, y1 = box
-            np.random.seed(42 + i)
-            color_int = tuple((np.random.rand(3) * 255).astype(int).tolist())
+            box_rng = np.random.RandomState(42 + i)
+            color_int = tuple((box_rng.rand(3) * 255).astype(int).tolist())
             draw.rectangle([x0, y0, x1, y1], outline=color_int, width=3)
 
             if scores is not None:
@@ -128,7 +124,7 @@ def ensure_model_on_device(sam3_model, target_device=None):
 
     current_device = next(model.parameters()).device
     if str(current_device) != target_device:
-        print(f"[SAM3] Moving model from {current_device} to {target_device}")
+        logger.info(f"Moving model from {current_device} to {target_device}")
         model.to(target_device)
         processor.device = target_device
         sam3_model["device"] = target_device
@@ -142,9 +138,61 @@ def offload_model_if_needed(sam3_model):
         current_device = next(model.parameters()).device
 
         if "cuda" in str(current_device):
-            print("[SAM3] Offloading model to CPU to free VRAM")
+            logger.info("Offloading model to CPU to free VRAM")
             model.to("cpu")
             processor.device = "cpu"
             sam3_model["device"] = "cpu"
             torch.cuda.empty_cache()
             gc.collect()
+
+
+def run_sam3_inference(
+    sam3_model: dict,
+    pil_image,
+    confidence_threshold: float,
+    text_prompt: str,
+    box_prompts: list,
+    box_labels: list,
+    point_prompts: list,
+    point_labels: list,
+    mask_prompt=None,
+) -> tuple:
+    """Run SAM3 inference: model setup, prompt injection, return raw (masks, boxes, scores)."""
+    ensure_model_on_device(sam3_model)
+    processor = sam3_model["processor"]
+    logger.info("Running segmentation")
+    logger.info(f"Confidence threshold: {confidence_threshold}")
+    logger.info(f"Image size: {pil_image.size}")
+
+    processor.set_confidence_threshold(confidence_threshold)
+    state = processor.set_image(pil_image)
+
+    if text_prompt and text_prompt.strip():
+        logger.info(f"Using text_prompt='{text_prompt.strip()}'")
+        state = processor.set_text_prompt(text_prompt.strip(), state)
+
+    logger.info(f"total box prompts={len(box_prompts)}")
+    if box_prompts:
+        state = processor.add_multiple_box_prompts(box_prompts, box_labels, state)
+
+    logger.info(f"total point prompts={len(point_prompts)}")
+    if point_prompts:
+        state = processor.add_point_prompt(point_prompts, point_labels, state)
+
+    if mask_prompt is not None:
+        if not isinstance(mask_prompt, torch.Tensor):
+            mask_prompt = torch.from_numpy(mask_prompt)
+        mask_prompt = mask_prompt.to(sam3_model["device"])
+        logger.info("Adding external mask_prompt")
+        state = processor.add_mask_prompt(mask_prompt, state)
+
+    masks = state.get("masks")
+    boxes = state.get("boxes")
+    scores = state.get("scores")
+
+    total_scores = len(scores) if scores is not None else 0
+    logger.debug(f"RAW PREDICTIONS: total {total_scores}")
+    if boxes is not None:
+        logger.debug(f"Output boxes shape: {boxes.shape}")
+
+    return masks, boxes, scores

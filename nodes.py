@@ -4,16 +4,17 @@ All class names and functions prefixed with SAM3BS for uniqueness.
 """
 
 import json
+import logging
 import os
 
 import torch
 
 from sam3_utils import (
     comfy_image_to_pil,
-    ensure_model_on_device,
     masks_to_comfy_mask,
     offload_model_if_needed,
     pil_to_comfy_image,
+    run_sam3_inference,
     tensor_to_list,
     visualize_masks_on_image,
 )
@@ -39,7 +40,7 @@ from .model_manager import download_sam3_model, get_available_models, get_model_
 from .sam3_lib.model.sam3_image_processor import Sam3Processor
 from .sam3_lib.model_builder import build_sam3_image_model
 
-_MODEL_CACHE = {}
+logger = logging.getLogger(__name__)
 
 
 class SAM3BSModelLoaderAndDownloader:
@@ -78,18 +79,14 @@ class SAM3BSModelLoaderAndDownloader:
     CATEGORY = "SAM3BS"
 
     def load_model(self, model_source: str, device: str):
+        """Build and return a SAM3_MODEL dict: {model, processor, device, original_device}."""
         hf_repo = "facebook/sam3"
-
-        """
-        Build and return a SAM3_MODEL dict:
-          {model, processor, device, original_device}
-        """
         # Resolve checkpoint path if needed
         checkpoint_path = None
 
         if model_source == "auto (API to cache)":
             # Let builder construct its default weights / config
-            print("[SAM3BSModelLoaderAdvanced] Using API/default SAM3 image model.")
+            logger.info("Using API/default SAM3 image model.")
             checkpoint_path = None
 
         elif model_source == "local (auto-download)":
@@ -98,22 +95,18 @@ class SAM3BSModelLoaderAndDownloader:
             checkpoint_path = os.path.join(sam3_dir, "sam3.pt")
             if not os.path.isfile(checkpoint_path):
                 raise RuntimeError(
-                    f"[SAM3BSModelLoaderAdvanced] Downloaded model file not found at: {checkpoint_path}"
+                    f"[SAM3BSModelLoaderAndDownloader] Downloaded model file not found at: {checkpoint_path}"
                 )
-            print(
-                f"[SAM3BSModelLoaderAdvanced] Using downloaded local checkpoint: {checkpoint_path}"
-            )
+            logger.info(f"Using downloaded local checkpoint: {checkpoint_path}")
 
         else:
             # Specific local checkpoint chosen from list under models/sam3
             checkpoint_path = get_model_path(model_source)
             if not checkpoint_path or not os.path.isfile(checkpoint_path):
                 raise RuntimeError(
-                    f"[SAM3BSModelLoaderAdvanced] Local model file not found: {model_source} -> {checkpoint_path}"
+                    f"[SAM3BSModelLoaderAndDownloader] Local model file not found: {model_source} -> {checkpoint_path}"
                 )
-            print(
-                f"[SAM3BSModelLoaderAdvanced] Using selected local checkpoint: {checkpoint_path}"
-            )
+            logger.info(f"Using selected local checkpoint: {checkpoint_path}")
 
         # --- Build SAM3 image model + processor, mirroring SAM3BSLoadModel ---
 
@@ -135,7 +128,7 @@ class SAM3BSModelLoaderAndDownloader:
             "original_device": device,
         }
 
-        print("[SAM3BSModelLoaderAdvanced] SAM3 model ready on device:", device)
+        logger.info(f"SAM3 model ready on device: {device}")
         return (model_dict,)
 
 
@@ -330,106 +323,60 @@ class SAM3BSSegmentation:
                 pipeline_mode,
             )
         )
-        print(
-            f"[SAM3] pipeline_mode='{pipeline_mode}', instances={instances} | "
+        logger.info(
+            f"pipeline_mode='{pipeline_mode}', instances={instances} | "
             f"pos_boxes={prompt_handler.valid_block(positive_boxes, 'boxes')}, "
             f"neg_boxes={prompt_handler.valid_block(negative_boxes, 'boxes')}, "
             f"pos_points={prompt_handler.valid_block(positive_points, 'points')}, "
             f"neg_points={prompt_handler.valid_block(negative_points, 'points')}"
         )
 
-        ensure_model_on_device(sam3_model)
-        processor = sam3_model["processor"]
-        print("[SAM3] Running segmentation")
-        print(f"[SAM3] Confidence threshold: {confidence_threshold}")
-
-        pil_image = comfy_image_to_pil(image)
-        print(f"[SAM3] Image size: {pil_image.size}")
-
-        _, height, width, _ = image.shape
-        processor.set_confidence_threshold(confidence_threshold)
-        state = processor.set_image(pil_image)
-
-        if text_prompt and text_prompt.strip():
-            print(f"[SAM3] Using text_prompt='{text_prompt.strip()}'")
-            state = processor.set_text_prompt(text_prompt.strip(), state)
-
         all_boxes, all_box_labels = prompt_handler.aggregate_prompts(
             positive_boxes, negative_boxes, "boxes"
         )
-        print(f"[SAM3] total box prompts={len(all_boxes)}")
-        if all_boxes:
-            state = processor.add_multiple_box_prompts(all_boxes, all_box_labels, state)
-
         all_points, all_point_labels = prompt_handler.aggregate_prompts(
             positive_points, negative_points, "points"
         )
-        print(f"[SAM3] total point prompts={len(all_points)}")
-        if all_points:
-            state = processor.add_point_prompt(all_points, all_point_labels, state)
 
-        if mask_prompt is not None:
-            if not isinstance(mask_prompt, torch.Tensor):
-                mask_prompt = torch.from_numpy(mask_prompt)
-            mask_prompt = mask_prompt.to(sam3_model["device"])
-            print("[SAM3] Adding external mask_prompt")
-            state = processor.add_mask_prompt(mask_prompt, state)
+        pil_image = comfy_image_to_pil(image)
+        _, height, width, _ = image.shape
 
-        masks = state.get("masks", None)
-        boxes = state.get("boxes", None)
-        scores = state.get("scores", None)
-
-        total_scores = len(scores) if scores is not None else 0
-        print(f"[SAM3 DEBUG] RAW PREDICTIONS: total {total_scores}")
-        if boxes is not None:
-            print(f"[SAM3 DEBUG] Output boxes shape: {boxes.shape}")
+        masks, boxes, scores = run_sam3_inference(
+            sam3_model=sam3_model,
+            pil_image=pil_image,
+            confidence_threshold=confidence_threshold,
+            text_prompt=text_prompt,
+            box_prompts=all_boxes,
+            box_labels=all_box_labels,
+            point_prompts=all_points,
+            point_labels=all_point_labels,
+            mask_prompt=mask_prompt,
+        )
 
         device_before = masks.device if masks is not None else "cpu"
 
-        before_count = len(masks) if masks is not None else 0
-        masks, boxes, scores = mask_filters.filter_by_size(
-            masks, boxes, scores, min_size
+        masks, boxes, scores = mask_filters.run_filter_pipeline(
+            masks,
+            boxes,
+            scores,
+            steps=[
+                (mask_filters.filter_by_size, (min_size,)),
+                (mask_filters.filter_by_density, (min_density,)),
+            ],
         )
         if masks is None:
-            print(f"[SAM3] All {before_count} detections removed by min_size filter")
-            offload_model_if_needed(sam3_model)
-            return lib_types.empty_segmentation_result(
-                height, width, pil_to_comfy_image, pil_image, device=device_before
-            )
-        if len(masks) < before_count:
-            print(
-                f"[SAM3] min_size={min_size}px removed {before_count - len(masks)} masks, keeping {len(masks)}"
-            )
-
-        before_count = len(masks)
-        masks, boxes, scores = mask_filters.filter_by_density(
-            masks, boxes, scores, min_density
-        )
-        if masks is None:
-            print(f"[SAM3] All {before_count} detections removed by min_density filter")
-            offload_model_if_needed(sam3_model)
-            return lib_types.empty_segmentation_result(
-                height, width, pil_to_comfy_image, pil_image, device=device_before
-            )
-        if len(masks) < before_count:
-            print(
-                f"[SAM3] min_density={min_density:.2f} removed {before_count - len(masks)} sparse masks, keeping {len(masks)}"
-            )
-
-        if masks is None or len(masks) == 0:
-            print(f"[SAM3] No detections found at threshold {confidence_threshold}")
             offload_model_if_needed(sam3_model)
             return lib_types.empty_segmentation_result(
                 height, width, pil_to_comfy_image, pil_image, device=device_before
             )
 
         if instances and boxes is not None:
-            print(
-                "[SAM3] Instances filter: keep only detections overlapping positive boxes / containing positive points"
+            logger.info(
+                "Instances filter: keep only detections overlapping positive boxes / containing positive points"
             )
             before_instances = len(boxes)
-            print(
-                f"[SAM3] Instances filter: total detections before filter={before_instances}"
+            logger.info(
+                f"Instances filter: total detections before filter={before_instances}"
             )
             boxes_device = boxes.device
             masks, boxes, scores = mask_filters.filter_by_instances(
@@ -443,15 +390,15 @@ class SAM3BSSegmentation:
                 iou_threshold=0.1,
             )
             if masks is None:
-                print(
-                    "[SAM3] Instances filter removed all detections; returning empty result"
+                logger.warning(
+                    "Instances filter removed all detections; returning empty result"
                 )
                 offload_model_if_needed(sam3_model)
                 return lib_types.empty_segmentation_result(
                     height, width, pil_to_comfy_image, pil_image, device=boxes_device
                 )
-            print(
-                f"[SAM3] Instances filter kept {len(masks)} of {before_instances} detections"
+            logger.info(
+                f"Instances filter kept {len(masks)} of {before_instances} detections"
             )
 
         masks, boxes, scores = mask_filters.limit_detections(
@@ -498,8 +445,8 @@ class SAM3BSSegmentation:
             else 0
         )
 
-        print(
-            f"[SAM3] Segmentation complete. {len(comfy_masks)} masks, {len(segs[1])} SEGS, "
+        logger.info(
+            f"Segmentation complete. {len(comfy_masks)} masks, {len(segs[1])} SEGS, "
             f"combined_segs has {combined_count} elements, "
             f"overlapping_segs has {overlapping_count} groups."
         )
@@ -646,13 +593,13 @@ class SAM3BSFlorence2SEGSCaptioner:
 
                 new_segs.append(
                     SEG(
-                        seg.cropped_image,
-                        seg.cropped_mask,
-                        seg.confidence,
-                        seg.crop_region,
-                        seg.bbox,
-                        seg.label,
-                        wrapper,
+                        cropped_image=seg.cropped_image,
+                        cropped_mask=seg.cropped_mask,
+                        confidence=seg.confidence,
+                        crop_region=seg.crop_region,
+                        bbox=seg.bbox,
+                        label=seg.label,
+                        control_net_wrapper=wrapper,
                     )
                 )
         finally:

@@ -3,7 +3,7 @@ import torch
 
 from .masktosegs import make_2d_mask, mask_to_segs
 
-from .geometry import UnionFind
+from .geometry import UnionFind, bboxes_overlap
 
 
 def make_label(text_prompt: str, index: int) -> str:
@@ -102,12 +102,7 @@ def build_overlapping_segs(
         for j in range(i + 1, n):
             if bboxes_ol[i] is None or bboxes_ol[j] is None:
                 continue
-            if (
-                bboxes_ol[i][0] <= bboxes_ol[j][2]
-                and bboxes_ol[i][2] >= bboxes_ol[j][0]
-                and bboxes_ol[i][1] <= bboxes_ol[j][3]
-                and bboxes_ol[i][3] >= bboxes_ol[j][1]
-            ):
+            if bboxes_overlap(bboxes_ol[i], bboxes_ol[j]):
                 if np.any(binary_masks[i] & binary_masks[j]):
                     uf.union(i, j)
 

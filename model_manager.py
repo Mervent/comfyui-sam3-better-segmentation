@@ -16,7 +16,7 @@ def get_sam3_models_path() -> str:
     """Get the path to SAM3 models directory"""
     try:
         base_path = folder_paths.models_dir
-    except:
+    except Exception:
         base_path = "models"
 
     sam3_path = os.path.join(base_path, SAM3_MODELS_DIR)
