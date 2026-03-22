@@ -117,6 +117,7 @@ def caption_image(
     num_beams: int = 3,
     do_sample: bool = True,
     seed: int | None = None,
+    use_cache: bool = False,
 ) -> str:
     """Run Florence2 captioning on a single PIL image.
 
@@ -160,7 +161,7 @@ def caption_image(
         max_new_tokens=max_new_tokens,
         do_sample=do_sample,
         num_beams=num_beams,
-        use_cache=False,
+        use_cache=use_cache,
     )
 
     result = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
@@ -194,6 +195,7 @@ def _caption_chunk(
     max_new_tokens: int,
     num_beams: int,
     do_sample: bool,
+    use_cache: bool = False,
 ) -> list[str]:
     """Caption a chunk of images in a single batched forward pass.
 
@@ -244,7 +246,7 @@ def _caption_chunk(
         max_new_tokens=max_new_tokens,
         do_sample=do_sample,
         num_beams=num_beams,
-        use_cache=False,
+        use_cache=use_cache,
     )
 
     texts = processor.batch_decode(generated_ids, skip_special_tokens=False)
@@ -294,6 +296,7 @@ def batch_caption_images(
     num_beams: int = 3,
     do_sample: bool = True,
     seed: int | None = None,
+    use_cache: bool = False,
 ) -> list[str]:
     """Run Florence2 captioning on a batch of PIL images.
 
@@ -332,6 +335,7 @@ def batch_caption_images(
                 num_beams=num_beams,
                 do_sample=do_sample,
                 seed=seed,
+                use_cache=use_cache,
             )
         ]
 
@@ -362,6 +366,7 @@ def batch_caption_images(
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
             do_sample=do_sample,
+            use_cache=use_cache,
         )
         print(f"[DEBUG batch_caption_images] chunk_captions: {chunk_captions!r}")
         all_captions.extend(chunk_captions)

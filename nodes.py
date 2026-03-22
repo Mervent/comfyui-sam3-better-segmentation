@@ -21,6 +21,12 @@ from .lib.florence2_captioner import (
     build_caption,
     crop_image_region,
 )
+from .lib.florence2_loader import (
+    FLORENCE2_MODELS,
+    PRECISION_MAP,
+    download_florence2,
+    load_florence2_model,
+)
 from .lib.masktosegs import SEG
 from .lib.model_manager import download_sam3_model, get_available_models, get_model_path
 from .lib.sam3_utils import (
@@ -553,6 +559,7 @@ class SAM3BSFlorence2SEGSCaptioner:
         fl2_model = florence2_model["model"]
         processor = florence2_model["processor"]
         dtype = florence2_model["dtype"]
+        use_cache = florence2_model.get("use_cache", False)
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         fl2_model.to(device)
@@ -579,6 +586,7 @@ class SAM3BSFlorence2SEGSCaptioner:
                 num_beams=num_beams,
                 do_sample=do_sample,
                 seed=seed,
+                use_cache=use_cache,
             )
         finally:
             if not keep_model_loaded:
@@ -637,14 +645,69 @@ class SAM3BSFlorence2SEGSCaptioner:
         return ((shape, new_segs), all_captions, preview_tensor)
 
 
+class SAM3BSFlorence2ModelLoader:
+    """Load Florence2 using native HuggingFace transformers.
+
+    No vendored code, no trust_remote_code. Requires transformers >= 4.56.0.
+    Outputs FL2MODEL compatible with both our captioner and kijai's nodes.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": (
+                    list(FLORENCE2_MODELS.keys()),
+                    {"default": "Florence-2-large"},
+                ),
+                "precision": (
+                    ["fp16", "bf16", "fp32"],
+                    {"default": "fp16"},
+                ),
+                "attention": (
+                    ["sdpa", "eager", "flash_attention_2"],
+                    {"default": "sdpa"},
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("FL2MODEL",)
+    RETURN_NAMES = ("florence2_model",)
+    FUNCTION = "load"
+    CATEGORY = "SAM3BS"
+
+    def load(self, model, precision, attention):
+        import comfy.model_management as mm
+
+        repo_id = FLORENCE2_MODELS[model]
+        dtype = PRECISION_MAP[precision]
+        offload_device = mm.unet_offload_device()
+
+        local_path = download_florence2(
+            repo_id=repo_id,
+            models_dir=folder_paths.models_dir,
+        )
+
+        fl2_model = load_florence2_model(
+            model_path=local_path,
+            dtype=dtype,
+            device=offload_device,
+            attn_implementation=attention,
+        )
+
+        return (fl2_model,)
+
+
 NODE_CLASS_MAPPINGS = {
     "SAM3BSModelLoader": SAM3BSModelLoaderAndDownloader,
     "SAM3BSSegmentation": SAM3BSSegmentation,
     "SAM3BSFlorence2SEGSCaptioner": SAM3BSFlorence2SEGSCaptioner,
+    "SAM3BSFlorence2ModelLoader": SAM3BSFlorence2ModelLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SAM3BSModelLoader": "SAM3BS Model Loader",
     "SAM3BSSegmentation": "SAM3BS Segmentation",
     "SAM3BSFlorence2SEGSCaptioner": "SAM3BS Florence2 SEGS Captioner",
+    "SAM3BSFlorence2ModelLoader": "SAM3BS Florence2 Model Loader",
 }
