@@ -16,9 +16,9 @@ from .lib import types as lib_types
 from .lib.conditioning_wrapper import ConditioningOverrideWrapper
 from .lib.florence2_captioner import (
     TASK_LIST,
+    batch_caption_images,
     bbox_crops_to_tensor,
     build_caption,
-    caption_image,
     crop_image_region,
 )
 from .lib.masktosegs import SEG
@@ -551,75 +551,72 @@ class SAM3BSFlorence2SEGSCaptioner:
         offload_device = mm.unet_offload_device()
         fl2_model.to(device)
 
-        new_segs: list = []
-        captions: list[str] = []
-        bbox_crops: list = []
+        # --- Phase 1: Crop all SEGs (CPU, fast) ---
+        pil_crops: list = []
+        for seg in seg_list:
+            region = (
+                tuple(seg.crop_region) if crop_source == "crop_region" else seg.bbox
+            )
+            pil_crops.append(crop_image_region(image=image, region=region))
 
+        # --- Phase 2: Batch Florence2 inference (GPU, chunked) ---
         try:
-            for seg in seg_list:
-                # --- Crop original image to selected region ---
-                region = (
-                    tuple(seg.crop_region) if crop_source == "crop_region" else seg.bbox
-                )
-                pil_crop = crop_image_region(image=image, region=region)
-                bbox_crops.append(pil_crop)
-
-                # --- Florence2 captioning ---
-                generated = caption_image(
-                    model=fl2_model,
-                    processor=processor,
-                    dtype=dtype,
-                    pil_image=pil_crop,
-                    task=task,
-                    device=device,
-                    max_new_tokens=max_new_tokens,
-                    num_beams=num_beams,
-                    do_sample=do_sample,
-                    seed=seed,
-                )
-
-                # --- Combine with user prompt ---
-                final_prompt = build_caption(
-                    generated=generated,
-                    user_prompt=text_input,
-                    prompt_mode=prompt_mode,
-                )
-                captions.append(final_prompt)
-
-                # --- CLIP encode → conditioning ---
-                tokens = clip.tokenize(final_prompt)
-                cond, pooled = clip.encode_from_tokens(
-                    tokens,
-                    return_pooled=True,
-                )
-                conditioning = [[cond, {"pooled_output": pooled}]]
-
-                # --- Wrap and attach to SEG ---
-                wrapper = ConditioningOverrideWrapper(
-                    conditioning=conditioning,
-                    mode=conditioning_mode,
-                    original_wrapper=seg.control_net_wrapper,
-                )
-
-                new_segs.append(
-                    SEG(
-                        cropped_image=seg.cropped_image,
-                        cropped_mask=seg.cropped_mask,
-                        confidence=seg.confidence,
-                        crop_region=seg.crop_region,
-                        bbox=seg.bbox,
-                        label=seg.label,
-                        control_net_wrapper=wrapper,
-                    )
-                )
+            captions_raw = batch_caption_images(
+                model=fl2_model,
+                processor=processor,
+                dtype=dtype,
+                pil_images=pil_crops,
+                task=task,
+                device=device,
+                max_new_tokens=max_new_tokens,
+                num_beams=num_beams,
+                do_sample=do_sample,
+                seed=seed,
+            )
         finally:
-            # --- Offload Florence2 model ---
             if not keep_model_loaded:
                 fl2_model.to(offload_device)
                 mm.soft_empty_cache()
 
+        # --- Phase 3: Build captions + CLIP encode per-SEG ---
+        new_segs: list = []
+        captions: list[str] = []
+
+        for i, seg in enumerate(seg_list):
+            final_prompt = build_caption(
+                generated=captions_raw[i],
+                user_prompt=text_input,
+                prompt_mode=prompt_mode,
+            )
+            captions.append(final_prompt)
+
+            tokens = clip.tokenize(final_prompt)
+            cond, pooled = clip.encode_from_tokens(
+                tokens,
+                return_pooled=True,
+            )
+            conditioning = [[cond, {"pooled_output": pooled}]]
+
+            wrapper = ConditioningOverrideWrapper(
+                conditioning=conditioning,
+                mode=conditioning_mode,
+                original_wrapper=seg.control_net_wrapper,
+            )
+
+            new_segs.append(
+                SEG(
+                    cropped_image=seg.cropped_image,
+                    cropped_mask=seg.cropped_mask,
+                    confidence=seg.confidence,
+                    crop_region=seg.crop_region,
+                    bbox=seg.bbox,
+                    label=seg.label,
+                    control_net_wrapper=wrapper,
+                )
+            )
+
         all_captions = "\n".join(captions)
-        preview_tensor = bbox_crops_to_tensor(bbox_crops)
+        preview_tensor = bbox_crops_to_tensor(pil_crops)
         return ((shape, new_segs), all_captions, preview_tensor)
 
 

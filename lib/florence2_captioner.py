@@ -6,6 +6,7 @@ Pure logic — zero ComfyUI imports.  Only torch, numpy, PIL, stdlib.
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Any
 
 import numpy as np
@@ -25,6 +26,10 @@ TASK_PROMPTS: dict[str, str] = {
 }
 
 TASK_LIST: list[str] = list(TASK_PROMPTS.keys())
+
+logger = logging.getLogger(__name__)
+
+_BATCH_CHUNK_SIZE = 8
 
 
 def hash_seed(seed: int) -> int:
@@ -175,6 +180,174 @@ def caption_image(
         clean = parsed[task_prompt].strip()
 
     return clean
+
+
+def _caption_chunk(
+    *,
+    model: Any,
+    processor: Any,
+    dtype: torch.dtype,
+    pil_images: list[Image.Image],
+    task_prompt: str,
+    device: torch.device | str,
+    max_new_tokens: int,
+    num_beams: int,
+    do_sample: bool,
+) -> list[str]:
+    """Caption a chunk of images in a single batched forward pass.
+
+    Parameters
+    ----------
+    model / processor / dtype:
+        Florence2 model, processor, and compute dtype.
+    pil_images:
+        Chunk of PIL crops (len ≤ ``_BATCH_CHUNK_SIZE``).
+    task_prompt:
+        Florence2 task token (e.g. ``"<CAPTION>"``).
+    device:
+        Torch device for inference.
+
+    Returns
+    -------
+    list[str]
+        One caption per image.
+    """
+    n = len(pil_images)
+
+    # All prompts identical → process text once, reuse input_ids.
+    # First call also gives pixel_values for image 0.
+    first = processor(
+        text=task_prompt,
+        images=pil_images[0],
+        return_tensors="pt",
+        do_rescale=False,
+    )
+    input_ids = first["input_ids"].repeat(n, 1).to(device)
+
+    # Each image gets its own pixel_values via the processor's
+    # resize / normalize pipeline.
+    pixel_batches: list[torch.Tensor] = [first["pixel_values"]]
+    for img in pil_images[1:]:
+        pv = processor(
+            text=task_prompt,
+            images=img,
+            return_tensors="pt",
+            do_rescale=False,
+        )["pixel_values"]
+        pixel_batches.append(pv)
+    pixel_values = torch.cat(pixel_batches).to(dtype).to(device)
+
+    generated_ids = model.generate(
+        input_ids=input_ids,
+        pixel_values=pixel_values,
+        max_new_tokens=max_new_tokens,
+        do_sample=do_sample,
+        num_beams=num_beams,
+    )
+
+    texts = processor.batch_decode(generated_ids, skip_special_tokens=False)
+
+    # Post-process each individually (Florence2 API is single-string).
+    results: list[str] = []
+    for text, img in zip(texts, pil_images):
+        w, h = img.size
+        parsed = processor.post_process_generation(
+            text,
+            task=task_prompt,
+            image_size=(w, h),
+        )
+        if task_prompt in parsed and isinstance(parsed[task_prompt], str):
+            results.append(parsed[task_prompt].strip())
+        else:
+            clean = text.replace("</s>", "").replace("<s>", "").strip()
+            results.append(clean)
+
+    return results
+
+
+def batch_caption_images(
+    *,
+    model: Any,
+    processor: Any,
+    dtype: torch.dtype,
+    pil_images: list[Image.Image],
+    task: str,
+    device: torch.device | str,
+    max_new_tokens: int = 1024,
+    num_beams: int = 3,
+    do_sample: bool = True,
+    seed: int | None = None,
+) -> list[str]:
+    """Run Florence2 captioning on a batch of PIL images.
+
+    Images are processed in chunks of ``_BATCH_CHUNK_SIZE`` to limit VRAM
+    usage.  A single image delegates to :func:`caption_image` directly.
+
+    Parameters
+    ----------
+    model / processor / dtype:
+        From the FL2MODEL dict.
+    pil_images:
+        List of PIL crops to caption.
+    task:
+        One of the keys in :data:`TASK_PROMPTS`.
+    device:
+        Torch device for inference.
+
+    Returns
+    -------
+    list[str]
+        One caption per image, in input order.
+    """
+    if not pil_images:
+        return []
+
+    if len(pil_images) == 1:
+        return [
+            caption_image(
+                model=model,
+                processor=processor,
+                dtype=dtype,
+                pil_image=pil_images[0],
+                task=task,
+                device=device,
+                max_new_tokens=max_new_tokens,
+                num_beams=num_beams,
+                do_sample=do_sample,
+                seed=seed,
+            )
+        ]
+
+    if seed is not None:
+        from transformers import set_seed as _set_seed
+
+        _set_seed(hash_seed(seed))
+
+    task_prompt = TASK_PROMPTS[task]
+
+    logger.info(
+        "Batching Florence2 inference: %d images in chunks of %d",
+        len(pil_images),
+        _BATCH_CHUNK_SIZE,
+    )
+
+    all_captions: list[str] = []
+    for chunk_start in range(0, len(pil_images), _BATCH_CHUNK_SIZE):
+        chunk = pil_images[chunk_start : chunk_start + _BATCH_CHUNK_SIZE]
+        chunk_captions = _caption_chunk(
+            model=model,
+            processor=processor,
+            dtype=dtype,
+            pil_images=chunk,
+            task_prompt=task_prompt,
+            device=device,
+            max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
+            do_sample=do_sample,
+        )
+        all_captions.extend(chunk_captions)
+
+    return all_captions
 
 
 def build_caption(
