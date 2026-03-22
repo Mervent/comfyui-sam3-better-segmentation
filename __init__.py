@@ -17,13 +17,6 @@ NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
 try:
-    import sam3  # noqa: F401
-    print("[SAM3BS] SAM3 Python package detected.")
-except ImportError as e:
-    print(f"[SAM3BS] SAM3 Python package not fully available: {e}")
-    print("[SAM3BS] Loaders that use local sam3.pt may still work.")
-
-try:
     from .nodes import NODE_CLASS_MAPPINGS as NODES
     from .nodes import NODE_DISPLAY_NAME_MAPPINGS as NAMES
 
@@ -38,6 +31,7 @@ try:
 
 except Exception as e:
     import traceback
+
     print(f"[SAM3BS] ERROR while loading nodes: {e}")
     traceback.print_exc()
     print("[SAM3BS] Nodes will be unavailable until this is fixed.")
