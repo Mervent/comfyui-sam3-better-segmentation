@@ -560,6 +560,7 @@ class SAM3BSFlorence2SEGSCaptioner:
             pil_crops.append(crop_image_region(image=image, region=region))
 
         # --- Phase 2: Batch Florence2 inference (GPU, chunked) ---
+        print(f"[DEBUG doit] {len(pil_crops)} crops, calling batch_caption_images")
         try:
             captions_raw = batch_caption_images(
                 model=fl2_model,
@@ -578,16 +579,26 @@ class SAM3BSFlorence2SEGSCaptioner:
                 fl2_model.to(offload_device)
                 mm.soft_empty_cache()
 
+        print(
+            f"[DEBUG doit] captions_raw type={type(captions_raw).__name__}, len={len(captions_raw)}"
+        )
+        for idx, cr in enumerate(captions_raw):
+            print(
+                f"[DEBUG doit] captions_raw[{idx}] type={type(cr).__name__}, value={cr!r}"
+            )
+
         # --- Phase 3: Build captions + CLIP encode per-SEG ---
         new_segs: list = []
         captions: list[str] = []
 
         for i, seg in enumerate(seg_list):
+            print(f"[DEBUG doit] seg[{i}] generated input: {captions_raw[i]!r}")
             final_prompt = build_caption(
                 generated=captions_raw[i],
                 user_prompt=text_input,
                 prompt_mode=prompt_mode,
             )
+            print(f"[DEBUG doit] seg[{i}] final_prompt: {final_prompt!r}")
             captions.append(final_prompt)
 
             tokens = clip.tokenize(final_prompt)
