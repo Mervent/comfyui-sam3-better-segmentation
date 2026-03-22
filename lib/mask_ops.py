@@ -38,6 +38,9 @@ def apply_per_mask(
     target_device = device if device is not None else masks.device
     masks_flat = normalize_masks(masks, to_cpu=True)
 
+    if masks_flat.shape[0] == 0:
+        return masks
+
     processed = []
     for idx in range(masks_flat.shape[0]):
         processed.append(fn(masks_flat[idx].numpy()).astype(np.float32))

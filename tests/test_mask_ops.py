@@ -118,6 +118,16 @@ def test_erode_shrinks() -> None:
     assert int((result > 0.5).sum()) < original_area
 
 
+def test_apply_per_mask_empty_tensor() -> None:
+    """Empty mask tensor (0 masks) is returned unchanged without error."""
+    empty = torch.zeros(0, 64, 64)
+
+    result = apply_per_mask(empty, lambda m: m)
+
+    assert result.shape == (0, 64, 64)
+    assert torch.equal(result, empty)
+
+
 def test_apply_per_mask_processes_all(masks_3d) -> None:
     """Function is applied to every mask in the batch."""
 

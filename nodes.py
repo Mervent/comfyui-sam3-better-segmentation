@@ -407,6 +407,12 @@ class SAM3BSSegmentation:
             masks, boxes, scores, actual_max_detections
         )
 
+        if masks is None or masks.numel() == 0:
+            offload_model_if_needed(sam3_model)
+            return lib_types.empty_segmentation_result(
+                height, width, pil_to_comfy_image, pil_image, device=device_before
+            )
+
         if fill_holes:
             masks = mask_ops.apply_per_mask(masks, mask_ops.fill_holes)
 
