@@ -6,7 +6,7 @@ from lib.florence2_captioner import (
     TASK_PROMPTS,
     bbox_crops_to_tensor,
     build_caption,
-    crop_seg_bbox,
+    crop_image_region,
     hash_seed,
 )
 
@@ -31,44 +31,55 @@ def test_hash_seed_different_inputs() -> None:
     assert hash_seed(1) != hash_seed(2)
 
 
-# --- crop_seg_bbox ---
+# --- crop_image_region ---
 
 
-def test_crop_seg_bbox_3d_tensor() -> None:
-    """[H, W, C] tensor is cropped to bbox and returned as PIL RGB."""
+def test_crop_image_region_3d_tensor() -> None:
+    """[H, W, C] tensor is cropped to region and returned as PIL RGB."""
     image = torch.rand(20, 30, 3)
-    bbox = (5, 5, 15, 15)
+    region = (5, 5, 15, 15)
 
-    result = crop_seg_bbox(image, bbox)
+    result = crop_image_region(image, region)
 
     assert isinstance(result, Image.Image)
     assert result.mode == "RGB"
     assert result.size == (10, 10)
 
 
-def test_crop_seg_bbox_4d_tensor() -> None:
+def test_crop_image_region_4d_tensor() -> None:
     """[B, H, W, C] tensor takes batch[0] and crops correctly."""
     image = torch.rand(2, 20, 30, 3)
-    bbox = (0, 0, 10, 8)
+    region = (0, 0, 10, 8)
 
-    result = crop_seg_bbox(image, bbox)
+    result = crop_image_region(image, region)
 
     assert isinstance(result, Image.Image)
     assert result.size == (10, 8)
 
 
-def test_crop_seg_bbox_pixel_values() -> None:
+def test_crop_image_region_pixel_values() -> None:
     """Cropped pixels match the source region scaled to 0-255."""
     image = torch.zeros(10, 10, 3)
     image[2:5, 3:7, :] = 1.0
-    bbox = (3, 2, 7, 5)
+    region = (3, 2, 7, 5)
 
-    result = crop_seg_bbox(image, bbox)
+    result = crop_image_region(image, region)
 
     assert result.size == (4, 3)
-    # All pixels in crop region were 1.0 → 255
+    # All pixels in crop region were 1.0 -> 255
     pixels = list(result.getdata())
     assert all(p == (255, 255, 255) for p in pixels)
+
+
+def test_crop_image_region_from_list_coords() -> None:
+    """Coords converted from list (crop_region format) work identically."""
+    image = torch.rand(20, 30, 3)
+    crop_region_list = [2, 3, 18, 15]
+
+    result = crop_image_region(image, tuple(crop_region_list))
+
+    assert isinstance(result, Image.Image)
+    assert result.size == (16, 12)
 
 
 # --- bbox_crops_to_tensor ---

@@ -19,7 +19,7 @@ from .lib.florence2_captioner import (
     bbox_crops_to_tensor,
     build_caption,
     caption_image,
-    crop_seg_bbox,
+    crop_image_region,
 )
 from .lib.masktosegs import SEG
 from .lib.model_manager import download_sam3_model, get_available_models, get_model_path
@@ -472,8 +472,8 @@ class SAM3BSFlorence2SEGSCaptioner:
     Replaces the multi-node chain:
         SEGSPreview → Florence2Run → StringListToString → AttachConditioning
 
-    For each SEG the node crops the original image to the SEG's region,
-    masks out non-segment pixels (so Florence2 sees only the object),
+    For each SEG the node crops the original image to either the tight
+    bounding box or expanded crop region (controlled by ``crop_source``),
     generates a caption, optionally combines it with a user prompt,
     CLIP-encodes the result, and attaches it as per-SEG conditioning
     via ``control_net_wrapper``.
@@ -495,6 +495,10 @@ class SAM3BSFlorence2SEGSCaptioner:
                     {"default": "prepend"},
                 ),
                 "conditioning_mode": (["replace", "concat"],),
+                "crop_source": (
+                    ["bbox", "crop_region"],
+                    {"default": "bbox"},
+                ),
             },
             "optional": {
                 "text_input": (
@@ -523,6 +527,7 @@ class SAM3BSFlorence2SEGSCaptioner:
         task,
         prompt_mode,
         conditioning_mode,
+        crop_source="bbox",
         text_input="",
         keep_model_loaded=False,
         max_new_tokens=1024,
@@ -552,8 +557,11 @@ class SAM3BSFlorence2SEGSCaptioner:
 
         try:
             for seg in seg_list:
-                # --- Crop original image to tight bbox ---
-                pil_crop = crop_seg_bbox(image=image, bbox=seg.bbox)
+                # --- Crop original image to selected region ---
+                region = (
+                    tuple(seg.crop_region) if crop_source == "crop_region" else seg.bbox
+                )
+                pil_crop = crop_image_region(image=image, region=region)
                 bbox_crops.append(pil_crop)
 
                 # --- Florence2 captioning ---

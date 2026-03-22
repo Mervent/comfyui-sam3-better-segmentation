@@ -33,28 +33,30 @@ def hash_seed(seed: int) -> int:
     return int(hashlib.sha256(seed_bytes).hexdigest(), 16) % (2**32)
 
 
-def crop_seg_bbox(
+def crop_image_region(
     image: torch.Tensor,
-    bbox: tuple[int, int, int, int],
+    region: tuple[int, ...],
 ) -> Image.Image:
-    """Crop original image to a SEG's tight bounding box.
+    """Crop original image to an ``(x1, y1, x2, y2)`` pixel region.
 
     Parameters
     ----------
     image:
         Full image tensor ``[B, H, W, C]`` or ``[H, W, C]``, float32 0-1.
-    bbox:
-        ``(x1, y1, x2, y2)`` pixel coordinates of the detection box.
+    region:
+        ``(x1, y1, x2, y2)`` pixel coordinates — may come from either
+        ``SEG.bbox`` (tight detection box) or ``SEG.crop_region``
+        (expanded context area).
 
     Returns
     -------
     PIL.Image.Image
-        RGB crop of the bbox region — natural image pixels, no masking.
+        RGB crop of the specified region — natural image pixels, no masking.
     """
     if image.ndim == 4:
         image = image[0]  # take first batch element
 
-    x1, y1, x2, y2 = bbox
+    x1, y1, x2, y2 = region
     crop = image[y1:y2, x1:x2, :]  # [h, w, C]
     crop_uint8 = (
         (crop.detach().cpu().float().numpy() * 255).clip(0, 255).astype(np.uint8)
