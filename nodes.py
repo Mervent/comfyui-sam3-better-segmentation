@@ -150,7 +150,7 @@ class SAM3BSSegmentation:
                 "confidence_threshold": (
                     "FLOAT",
                     {
-                        "default": 0.4,
+                        "default": 0.2,
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.05,
@@ -216,7 +216,7 @@ class SAM3BSSegmentation:
                 "min_size": (
                     "INT",
                     {
-                        "default": 100,
+                        "default": 32,
                         "min": 1,
                         "max": 500,
                         "step": 1,
@@ -315,7 +315,7 @@ class SAM3BSSegmentation:
         text_prompt="",
         sam3_selectors_pipe=None,
         mask_prompt=None,
-        max_detections=10,
+        max_detections=50,
     ):
         actual_max_detections = -1 if detect_all else max_detections
 
