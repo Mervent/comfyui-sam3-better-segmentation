@@ -250,10 +250,6 @@ def _caption_chunk(
     )
 
     texts = processor.batch_decode(generated_ids, skip_special_tokens=False)
-    print(f"[DEBUG _caption_chunk] generated_ids shape: {generated_ids.shape}")
-    print(f"[DEBUG _caption_chunk] batch_decode returned {len(texts)} texts")
-    for idx, t in enumerate(texts):
-        print(f"[DEBUG _caption_chunk] raw text[{idx}]: {t!r}")
 
     # Post-process each individually (Florence2 API is single-string).
     results: list[str] = []
@@ -264,23 +260,12 @@ def _caption_chunk(
             task=task_prompt,
             image_size=(w, h),
         )
-        print(
-            f"[DEBUG _caption_chunk] parsed keys: {list(parsed.keys())}, task_prompt={task_prompt!r}"
-        )
-        print(
-            f"[DEBUG _caption_chunk] parsed[task_prompt] type: {type(parsed.get(task_prompt))}, value: {parsed.get(task_prompt)!r}"
-        )
         if task_prompt in parsed and isinstance(parsed[task_prompt], str):
             results.append(parsed[task_prompt].strip())
-            print(
-                f"[DEBUG _caption_chunk] appended (parsed): {parsed[task_prompt].strip()!r}"
-            )
         else:
             clean = text.replace("</s>", "").replace("<s>", "").strip()
             results.append(clean)
-            print(f"[DEBUG _caption_chunk] appended (fallback): {clean!r}")
 
-    print(f"[DEBUG _caption_chunk] final results: {results!r}")
     return results
 
 
@@ -346,16 +331,9 @@ def batch_caption_images(
 
     task_prompt = TASK_PROMPTS[task]
 
-    print(
-        f"[DEBUG batch_caption_images] {len(pil_images)} images, chunk_size={_BATCH_CHUNK_SIZE}"
-    )
-
     all_captions: list[str] = []
     for chunk_start in range(0, len(pil_images), _BATCH_CHUNK_SIZE):
         chunk = pil_images[chunk_start : chunk_start + _BATCH_CHUNK_SIZE]
-        print(
-            f"[DEBUG batch_caption_images] processing chunk [{chunk_start}:{chunk_start + len(chunk)}]"
-        )
         chunk_captions = _caption_chunk(
             model=model,
             processor=processor,
@@ -368,10 +346,8 @@ def batch_caption_images(
             do_sample=do_sample,
             use_cache=use_cache,
         )
-        print(f"[DEBUG batch_caption_images] chunk_captions: {chunk_captions!r}")
         all_captions.extend(chunk_captions)
 
-    print(f"[DEBUG batch_caption_images] returning: {all_captions!r}")
     return all_captions
 
 
