@@ -160,6 +160,7 @@ def caption_image(
         max_new_tokens=max_new_tokens,
         do_sample=do_sample,
         num_beams=num_beams,
+        use_cache=False,
     )
 
     result = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
@@ -243,6 +244,7 @@ def _caption_chunk(
         max_new_tokens=max_new_tokens,
         do_sample=do_sample,
         num_beams=num_beams,
+        use_cache=False,
     )
 
     texts = processor.batch_decode(generated_ids, skip_special_tokens=False)
