@@ -1,6 +1,8 @@
 import torch
 from PIL import Image
 
+import numpy as np
+
 from lib.florence2_captioner import (
     TASK_LIST,
     TASK_PROMPTS,
@@ -8,6 +10,7 @@ from lib.florence2_captioner import (
     build_caption,
     crop_image_region,
     hash_seed,
+    mask_crop_image_region,
 )
 
 
@@ -177,3 +180,122 @@ def test_build_caption_empty_user_falls_back() -> None:
 def test_task_prompts_keys_match_task_list() -> None:
     """TASK_LIST is derived from TASK_PROMPTS keys."""
     assert TASK_LIST == list(TASK_PROMPTS.keys())
+
+
+# --- mask_crop_image_region ---
+
+
+def test_mask_crop_image_region_black_background() -> None:
+    """Black mode zeros out background pixels; foreground stays white."""
+    image = torch.ones(20, 20, 3)  # all-white image
+    mask = np.zeros((20, 20), dtype=np.float32)
+    mask[:, :10] = 1.0  # left half = foreground
+    region = (0, 0, 20, 20)
+
+    result = mask_crop_image_region(
+        image=image,
+        region=region,
+        mask=mask,
+        crop_region=region,
+        mask_background="black",
+    )
+
+    assert isinstance(result, Image.Image)
+    assert result.size == (20, 20)
+    pixels = np.array(result)
+    # Left half (foreground) stays white.
+    assert np.all(pixels[:, :10, :] == 255)
+    # Right half (background) becomes black.
+    assert np.all(pixels[:, 10:, :] == 0)
+
+
+def test_mask_crop_image_region_gray_background() -> None:
+    """Gray mode fills background with (128, 128, 128)."""
+    image = torch.ones(20, 20, 3)
+    mask = np.zeros((20, 20), dtype=np.float32)
+    mask[:, :10] = 1.0
+    region = (0, 0, 20, 20)
+
+    result = mask_crop_image_region(
+        image=image,
+        region=region,
+        mask=mask,
+        crop_region=region,
+        mask_background="gray",
+    )
+
+    pixels = np.array(result)
+    assert np.all(pixels[:, :10, :] == 255)
+    assert np.all(pixels[:, 10:, :] == 128)
+
+
+def test_mask_crop_image_region_blur_background() -> None:
+    """Blur mode alters background pixels so they differ from the original."""
+    # Checkerboard-like image so blur produces visibly different values.
+    image = torch.zeros(20, 20, 3)
+    image[::2, ::2, :] = 1.0
+    mask = np.zeros((20, 20), dtype=np.float32)
+    mask[:, :10] = 1.0
+    region = (0, 0, 20, 20)
+
+    original_crop = crop_image_region(image, region)
+    original_pixels = np.array(original_crop)
+
+    result = mask_crop_image_region(
+        image=image,
+        region=region,
+        mask=mask,
+        crop_region=region,
+        mask_background="blur",
+    )
+
+    result_pixels = np.array(result)
+    # Foreground (left half) is identical to original.
+    np.testing.assert_array_equal(result_pixels[:, :10, :], original_pixels[:, :10, :])
+    # Background (right half) differs from original due to blur.
+    assert not np.array_equal(result_pixels[:, 10:, :], original_pixels[:, 10:, :])
+
+
+def test_mask_crop_image_region_bbox_slicing() -> None:
+    """When region is a bbox sub-region, mask is sliced from crop_region coords."""
+    image = torch.ones(20, 20, 3)
+    # Mask sized to crop_region (full 20x20): top half foreground, bottom half bg.
+    mask = np.zeros((20, 20), dtype=np.float32)
+    mask[:10, :] = 1.0
+    crop_region = (0, 0, 20, 20)
+    # Bbox is a centered sub-region.
+    bbox = (5, 5, 15, 15)
+
+    result = mask_crop_image_region(
+        image=image,
+        region=bbox,
+        mask=mask,
+        crop_region=crop_region,
+        mask_background="black",
+    )
+
+    assert result.size == (10, 10)
+    pixels = np.array(result)
+    # Within the bbox, rows 5-9 of the full image are foreground (mask rows 5-9 = 1).
+    assert np.all(pixels[:5, :, :] == 255)
+    # Rows 10-14 of the full image are background (mask rows 10-14 = 0).
+    assert np.all(pixels[5:, :, :] == 0)
+
+
+def test_mask_crop_image_region_unknown_mode_returns_unmasked() -> None:
+    """Unknown mask_background falls back to an unmasked crop."""
+    image = torch.ones(10, 10, 3)
+    mask = np.zeros((10, 10), dtype=np.float32)
+    region = (0, 0, 10, 10)
+
+    result = mask_crop_image_region(
+        image=image,
+        region=region,
+        mask=mask,
+        crop_region=region,
+        mask_background="unknown_mode",
+    )
+
+    pixels = np.array(result)
+    # All pixels remain white — mask was NOT applied.
+    assert np.all(pixels == 255)

@@ -20,6 +20,7 @@ from .lib.florence2_captioner import (
     bbox_crops_to_tensor,
     build_caption,
     crop_image_region,
+    mask_crop_image_region,
 )
 from .lib.florence2_loader import (
     FLORENCE2_MODELS,
@@ -511,6 +512,10 @@ class SAM3BSFlorence2SEGSCaptioner:
                     ["bbox", "crop_region"],
                     {"default": "bbox"},
                 ),
+                "mask_background": (
+                    ["none", "black", "gray", "blur"],
+                    {"default": "none"},
+                ),
             },
             "optional": {
                 "text_input": (
@@ -540,6 +545,7 @@ class SAM3BSFlorence2SEGSCaptioner:
         prompt_mode,
         conditioning_mode,
         crop_source="bbox",
+        mask_background="none",
         text_input="",
         keep_model_loaded=False,
         max_new_tokens=1024,
@@ -570,7 +576,18 @@ class SAM3BSFlorence2SEGSCaptioner:
             region = (
                 tuple(seg.crop_region) if crop_source == "crop_region" else seg.bbox
             )
-            pil_crops.append(crop_image_region(image=image, region=region))
+            if mask_background != "none":
+                pil_crops.append(
+                    mask_crop_image_region(
+                        image=image,
+                        region=region,
+                        mask=seg.cropped_mask,
+                        crop_region=tuple(seg.crop_region),
+                        mask_background=mask_background,
+                    )
+                )
+            else:
+                pil_crops.append(crop_image_region(image=image, region=region))
 
         # --- Phase 2: Batch Florence2 inference (GPU, chunked) ---
         try:
@@ -597,13 +614,11 @@ class SAM3BSFlorence2SEGSCaptioner:
         captions: list[str] = []
 
         for i, seg in enumerate(seg_list):
-            print(f"[DEBUG doit] seg[{i}] generated input: {captions_raw[i]!r}")
             final_prompt = build_caption(
                 generated=captions_raw[i],
                 user_prompt=text_input,
                 prompt_mode=prompt_mode,
             )
-            print(f"[DEBUG doit] seg[{i}] final_prompt: {final_prompt!r}")
             captions.append(final_prompt)
 
             tokens = clip.tokenize(final_prompt)

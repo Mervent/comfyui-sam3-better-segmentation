@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageFilter
 
 # Only captioning / prompt-gen tasks — detection/segmentation/OCR tasks
 # return structured data (bboxes, polygons) rather than useful text.
@@ -30,6 +30,7 @@ TASK_LIST: list[str] = list(TASK_PROMPTS.keys())
 logger = logging.getLogger(__name__)
 
 _BATCH_CHUNK_SIZE = 8
+_BLUR_RADIUS = 16
 
 
 def hash_seed(seed: int) -> int:
@@ -67,6 +68,80 @@ def crop_image_region(
         (crop.detach().cpu().float().numpy() * 255).clip(0, 255).astype(np.uint8)
     )
     return Image.fromarray(crop_uint8)
+
+
+def mask_crop_image_region(
+    *,
+    image: torch.Tensor,
+    region: tuple[int, ...],
+    mask: np.ndarray,
+    crop_region: tuple[int, ...],
+    mask_background: str,
+) -> Image.Image:
+    """Crop image to *region* and suppress background pixels using *mask*.
+
+    The mask (from ``SEG.cropped_mask``) is always sized to *crop_region*.
+    When *region* differs from *crop_region* (i.e. ``crop_source="bbox"``),
+    the mask is sliced to align with the smaller crop.
+
+    Parameters
+    ----------
+    image:
+        Full image tensor ``[B, H, W, C]`` or ``[H, W, C]``, float32 0-1.
+    region:
+        ``(x1, y1, x2, y2)`` pixel coordinates used for cropping — either
+        ``SEG.bbox`` or ``SEG.crop_region``.
+    mask:
+        ``SEG.cropped_mask`` — numpy ``[H', W']`` float32 0-1, sized to
+        *crop_region* dimensions.
+    crop_region:
+        ``(x1, y1, x2, y2)`` from ``SEG.crop_region``.  Used to compute
+        the offset when *region* is a sub-region (bbox).
+    mask_background:
+        ``"black"`` — background pixels become ``(0, 0, 0)``.
+        ``"gray"``  — background pixels become ``(128, 128, 128)``.
+        ``"blur"``  — background pixels are Gaussian-blurred.
+
+    Returns
+    -------
+    PIL.Image.Image
+        RGB crop with background suppressed according to *mask_background*.
+    """
+    if image.ndim == 4:
+        image = image[0]
+
+    rx1, ry1, rx2, ry2 = region
+    crop = image[ry1:ry2, rx1:rx2, :]
+    crop_uint8 = (
+        (crop.detach().cpu().float().numpy() * 255).clip(0, 255).astype(np.uint8)
+    )
+
+    # Align mask to the crop dimensions.
+    cx1, cy1 = crop_region[0], crop_region[1]
+    off_x = rx1 - cx1
+    off_y = ry1 - cy1
+    crop_h, crop_w = crop_uint8.shape[:2]
+    aligned_mask = mask[off_y : off_y + crop_h, off_x : off_x + crop_w]
+
+    # Expand to [H, W, 1] for broadcasting.
+    mask_3d = aligned_mask[:, :, np.newaxis].astype(np.float32)
+
+    fg = crop_uint8.astype(np.float32)
+
+    if mask_background == "black":
+        bg = np.zeros_like(fg)
+    elif mask_background == "gray":
+        bg = np.full_like(fg, 128.0)
+    elif mask_background == "blur":
+        pil_crop = Image.fromarray(crop_uint8)
+        blurred = pil_crop.filter(ImageFilter.GaussianBlur(radius=_BLUR_RADIUS))
+        bg = np.asarray(blurred, dtype=np.float32)
+    else:
+        # Unknown mode — return unmasked crop as fallback.
+        return Image.fromarray(crop_uint8)
+
+    result = (fg * mask_3d + bg * (1.0 - mask_3d)).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(result)
 
 
 def bbox_crops_to_tensor(pil_images: list[Image.Image]) -> torch.Tensor:
