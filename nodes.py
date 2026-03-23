@@ -325,6 +325,7 @@ class SAM3BSSegmentation:
         max_detections=50,
     ):
         actual_max_detections = -1 if detect_all else max_detections
+        output_device = image.device
 
         positive_boxes, negative_boxes, positive_points, negative_points = (
             prompt_handler.extract_by_mode(
@@ -362,8 +363,6 @@ class SAM3BSSegmentation:
             mask_prompt=mask_prompt,
         )
 
-        device_before = masks.device if masks is not None else "cpu"
-
         masks, boxes, scores = mask_filters.run_filter_pipeline(
             masks,
             boxes,
@@ -376,7 +375,7 @@ class SAM3BSSegmentation:
         if masks is None:
             offload_model_if_needed(sam3_model)
             return lib_types.empty_segmentation_result(
-                height, width, pil_to_comfy_image, pil_image, device=device_before
+                height, width, pil_to_comfy_image, pil_image, device=output_device
             )
 
         if instances and boxes is not None:
@@ -387,7 +386,6 @@ class SAM3BSSegmentation:
             logger.info(
                 f"Instances filter: total detections before filter={before_instances}"
             )
-            boxes_device = boxes.device
             masks, boxes, scores = mask_filters.filter_by_instances(
                 masks,
                 boxes,
@@ -404,7 +402,7 @@ class SAM3BSSegmentation:
                 )
                 offload_model_if_needed(sam3_model)
                 return lib_types.empty_segmentation_result(
-                    height, width, pil_to_comfy_image, pil_image, device=boxes_device
+                    height, width, pil_to_comfy_image, pil_image, device=output_device
                 )
             logger.info(
                 f"Instances filter kept {len(masks)} of {before_instances} detections"
@@ -417,7 +415,7 @@ class SAM3BSSegmentation:
         if masks is None or masks.numel() == 0:
             offload_model_if_needed(sam3_model)
             return lib_types.empty_segmentation_result(
-                height, width, pil_to_comfy_image, pil_image, device=device_before
+                height, width, pil_to_comfy_image, pil_image, device=output_device
             )
 
         if fill_holes:
@@ -428,11 +426,11 @@ class SAM3BSSegmentation:
                 masks, lambda m: mask_ops.dilate_erode(m, dilation)
             )
 
-        comfy_masks = masks_to_comfy_mask(masks)
+        comfy_masks = masks_to_comfy_mask(masks).to(output_device)
         combined_tensor = mask_ops.build_combined_mask(masks)
-        combined_mask = masks_to_comfy_mask(combined_tensor)
+        combined_mask = masks_to_comfy_mask(combined_tensor).to(output_device)
         vis_image = visualize_masks_on_image(pil_image, masks, boxes, scores, alpha=0.5)
-        vis_tensor = pil_to_comfy_image(vis_image)
+        vis_tensor = pil_to_comfy_image(vis_image).to(output_device)
 
         def tensor_to_list_safe(t):
             if t is None:

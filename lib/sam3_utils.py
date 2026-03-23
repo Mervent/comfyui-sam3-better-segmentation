@@ -31,7 +31,7 @@ def pil_to_comfy_image(pil_image):
 
 
 def masks_to_comfy_mask(masks):
-    """Convert SAM3 masks to ComfyUI mask format [N, H, W] float32 on CPU."""
+    """Convert SAM3 masks to ComfyUI mask format [N, H, W] float32."""
     if isinstance(masks, np.ndarray):
         masks = torch.from_numpy(masks).float()
     elif isinstance(masks, torch.Tensor):
@@ -43,7 +43,7 @@ def masks_to_comfy_mask(masks):
         masks = masks / 255.0
     if masks.ndim == 4 and masks.shape[1] == 1:
         masks = masks.squeeze(1)
-    return masks.cpu()
+    return masks
 
 
 def visualize_masks_on_image(image, masks, boxes=None, scores=None, alpha=0.5):
