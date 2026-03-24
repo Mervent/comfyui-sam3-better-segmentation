@@ -36,6 +36,7 @@ from .lib.sam3_utils import (
     offload_model_if_needed,
     pil_to_comfy_image,
     run_sam3_inference,
+    run_sam3_multi_inference,
     tensor_to_list,
     visualize_masks_on_image,
 )
@@ -43,11 +44,163 @@ from .lib.segs_builder import (
     build_combined_segs,
     build_detection_segs,
     build_overlapping_segs,
+    make_label,
 )
 from .sam3_lib.model.sam3_image_processor import Sam3Processor
 from .sam3_lib.model_builder import build_sam3_image_model
 
 logger = logging.getLogger(__name__)
+
+
+def _filter_single_prompt_results(
+    masks: torch.Tensor | None,
+    boxes: torch.Tensor | None,
+    scores: torch.Tensor | None,
+    min_size: int,
+    min_density: float,
+    instances: bool,
+    positive_boxes,
+    positive_points,
+    width: int,
+    height: int,
+) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    masks, boxes, scores = mask_filters.run_filter_pipeline(
+        masks,
+        boxes,
+        scores,
+        steps=[
+            (mask_filters.filter_by_size, (min_size,)),
+            (mask_filters.filter_by_density, (min_density,)),
+        ],
+    )
+    if masks is None:
+        return None, None, None
+
+    if instances and boxes is not None:
+        masks, boxes, scores = mask_filters.filter_by_instances(
+            masks,
+            boxes,
+            scores,
+            positive_boxes,
+            positive_points,
+            width,
+            height,
+            iou_threshold=0.1,
+        )
+
+    return masks, boxes, scores
+
+
+def _run_multi_prompt(
+    sam3_model: dict,
+    pil_image,
+    confidence_threshold: float,
+    sub_prompts: list[str],
+    all_boxes: list,
+    all_box_labels: list,
+    all_points: list,
+    all_point_labels: list,
+    mask_prompt,
+    min_size: int,
+    min_density: float,
+    instances: bool,
+    positive_boxes,
+    positive_points,
+    width: int,
+    height: int,
+    actual_max_detections: int,
+) -> tuple[
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    list[str] | None,
+]:
+    collected_masks: list[torch.Tensor] = []
+    collected_boxes: list[torch.Tensor] = []
+    collected_scores: list[torch.Tensor] = []
+    collected_labels: list[str] = []
+
+    text_results = run_sam3_multi_inference(
+        sam3_model=sam3_model,
+        pil_image=pil_image,
+        confidence_threshold=confidence_threshold,
+        text_prompts=sub_prompts,
+    )
+
+    for masks, boxes, scores, prompt_text in text_results:
+        masks, boxes, scores = _filter_single_prompt_results(
+            masks=masks,
+            boxes=boxes,
+            scores=scores,
+            min_size=min_size,
+            min_density=min_density,
+            instances=instances,
+            positive_boxes=positive_boxes,
+            positive_points=positive_points,
+            width=width,
+            height=height,
+        )
+        if masks is None:
+            continue
+        collected_masks.append(masks)
+        collected_boxes.append(boxes)
+        collected_scores.append(scores)
+        collected_labels.extend(make_label(prompt_text, i) for i in range(len(masks)))
+
+    has_geometric = bool(all_boxes or all_points) or mask_prompt is not None
+    if has_geometric:
+        geo_masks, geo_boxes, geo_scores = run_sam3_inference(
+            sam3_model=sam3_model,
+            pil_image=pil_image,
+            confidence_threshold=confidence_threshold,
+            text_prompt="",
+            box_prompts=all_boxes,
+            box_labels=all_box_labels,
+            point_prompts=all_points,
+            point_labels=all_point_labels,
+            mask_prompt=mask_prompt,
+        )
+        geo_masks, geo_boxes, geo_scores = _filter_single_prompt_results(
+            masks=geo_masks,
+            boxes=geo_boxes,
+            scores=geo_scores,
+            min_size=min_size,
+            min_density=min_density,
+            instances=instances,
+            positive_boxes=positive_boxes,
+            positive_points=positive_points,
+            width=width,
+            height=height,
+        )
+        if geo_masks is not None:
+            collected_masks.append(geo_masks)
+            collected_boxes.append(geo_boxes)
+            collected_scores.append(geo_scores)
+            collected_labels.extend(
+                make_label("detection", i) for i in range(len(geo_masks))
+            )
+
+    if not collected_masks:
+        return None, None, None, None
+
+    masks = torch.cat(collected_masks, dim=0)
+    boxes = torch.cat(collected_boxes, dim=0)
+    scores = torch.cat(collected_scores, dim=0)
+
+    if actual_max_detections > 0 and len(masks) > actual_max_detections:
+        _, top_indices = scores.topk(actual_max_detections)
+        masks = masks[top_indices]
+        boxes = boxes[top_indices]
+        scores = scores[top_indices]
+        collected_labels = [collected_labels[i] for i in top_indices.tolist()]
+
+    logger.info(
+        "Multi-prompt merge: %d total masks from %d sub-prompts",
+        len(masks),
+        len(sub_prompts),
+    )
+
+    return masks, boxes, scores, collected_labels
 
 
 class SAM3BSModelLoaderAndDownloader:
@@ -351,68 +504,97 @@ class SAM3BSSegmentation:
         pil_image = comfy_image_to_pil(image)
         _, height, width, _ = image.shape
 
-        masks, boxes, scores = run_sam3_inference(
-            sam3_model=sam3_model,
-            pil_image=pil_image,
-            confidence_threshold=confidence_threshold,
-            text_prompt=text_prompt,
-            box_prompts=all_boxes,
-            box_labels=all_box_labels,
-            point_prompts=all_points,
-            point_labels=all_point_labels,
-            mask_prompt=mask_prompt,
-        )
+        sub_prompts = prompt_handler.split_text_prompts(text_prompt)
+        per_mask_labels: list[str] | None = None
 
-        masks, boxes, scores = mask_filters.run_filter_pipeline(
-            masks,
-            boxes,
-            scores,
-            steps=[
-                (mask_filters.filter_by_size, (min_size,)),
-                (mask_filters.filter_by_density, (min_density,)),
-            ],
-        )
-        if masks is None:
-            offload_model_if_needed(sam3_model)
-            return lib_types.empty_segmentation_result(
-                height, width, pil_to_comfy_image, pil_image, device=output_device
+        if len(sub_prompts) > 1:
+            masks, boxes, scores, per_mask_labels = _run_multi_prompt(
+                sam3_model=sam3_model,
+                pil_image=pil_image,
+                confidence_threshold=confidence_threshold,
+                sub_prompts=sub_prompts,
+                all_boxes=all_boxes,
+                all_box_labels=all_box_labels,
+                all_points=all_points,
+                all_point_labels=all_point_labels,
+                mask_prompt=mask_prompt,
+                min_size=min_size,
+                min_density=min_density,
+                instances=instances,
+                positive_boxes=positive_boxes,
+                positive_points=positive_points,
+                width=width,
+                height=height,
+                actual_max_detections=actual_max_detections,
+            )
+        else:
+            single_prompt = sub_prompts[0] if sub_prompts else ""
+            masks, boxes, scores = run_sam3_inference(
+                sam3_model=sam3_model,
+                pil_image=pil_image,
+                confidence_threshold=confidence_threshold,
+                text_prompt=single_prompt,
+                box_prompts=all_boxes,
+                box_labels=all_box_labels,
+                point_prompts=all_points,
+                point_labels=all_point_labels,
+                mask_prompt=mask_prompt,
             )
 
-        if instances and boxes is not None:
-            logger.info(
-                "Instances filter: keep only detections overlapping positive boxes / containing positive points"
-            )
-            before_instances = len(boxes)
-            logger.info(
-                f"Instances filter: total detections before filter={before_instances}"
-            )
-            masks, boxes, scores = mask_filters.filter_by_instances(
+            masks, boxes, scores = mask_filters.run_filter_pipeline(
                 masks,
                 boxes,
                 scores,
-                positive_boxes,
-                positive_points,
-                width,
-                height,
-                iou_threshold=0.1,
+                steps=[
+                    (mask_filters.filter_by_size, (min_size,)),
+                    (mask_filters.filter_by_density, (min_density,)),
+                ],
             )
             if masks is None:
-                logger.warning(
-                    "Instances filter removed all detections; returning empty result"
-                )
                 offload_model_if_needed(sam3_model)
                 return lib_types.empty_segmentation_result(
                     height, width, pil_to_comfy_image, pil_image, device=output_device
                 )
-            logger.info(
-                f"Instances filter kept {len(masks)} of {before_instances} detections"
+
+            if instances and boxes is not None:
+                logger.info(
+                    "Instances filter: keep only detections overlapping positive boxes / containing positive points"
+                )
+                before_instances = len(boxes)
+                logger.info(
+                    f"Instances filter: total detections before filter={before_instances}"
+                )
+                masks, boxes, scores = mask_filters.filter_by_instances(
+                    masks,
+                    boxes,
+                    scores,
+                    positive_boxes,
+                    positive_points,
+                    width,
+                    height,
+                    iou_threshold=0.1,
+                )
+                if masks is None:
+                    logger.warning(
+                        "Instances filter removed all detections; returning empty result"
+                    )
+                    offload_model_if_needed(sam3_model)
+                    return lib_types.empty_segmentation_result(
+                        height,
+                        width,
+                        pil_to_comfy_image,
+                        pil_image,
+                        device=output_device,
+                    )
+                logger.info(
+                    f"Instances filter kept {len(masks)} of {before_instances} detections"
+                )
+
+            masks, boxes, scores = mask_filters.limit_detections(
+                masks, boxes, scores, actual_max_detections
             )
 
-        masks, boxes, scores = mask_filters.limit_detections(
-            masks, boxes, scores, actual_max_detections
-        )
-
-        if masks is None or masks.numel() == 0:
+        if masks is None or (isinstance(masks, torch.Tensor) and masks.numel() == 0):
             offload_model_if_needed(sam3_model)
             return lib_types.empty_segmentation_result(
                 height, width, pil_to_comfy_image, pil_image, device=output_device
@@ -440,12 +622,17 @@ class SAM3BSSegmentation:
         boxes_json = json.dumps(tensor_to_list_safe(boxes), indent=2)
         scores_json = json.dumps(tensor_to_list_safe(scores), indent=2)
 
-        segs = build_detection_segs(masks, text_prompt, width, height, crop_factor)
+        display_prompt = (
+            " | ".join(sub_prompts) if len(sub_prompts) > 1 else text_prompt
+        )
+        segs = build_detection_segs(
+            masks, display_prompt, width, height, crop_factor, labels=per_mask_labels
+        )
         combined_segs = build_combined_segs(
-            combined_tensor, text_prompt, width, height, crop_factor
+            combined_tensor, display_prompt, width, height, crop_factor
         )
         overlapping_segs = build_overlapping_segs(
-            masks, text_prompt, width, height, crop_factor
+            masks, display_prompt, width, height, crop_factor, labels=per_mask_labels
         )
         combined_count = (
             len(combined_segs[1])

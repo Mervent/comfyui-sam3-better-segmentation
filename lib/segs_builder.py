@@ -19,6 +19,7 @@ def build_detection_segs(
     width: int,
     height: int,
     crop_factor: float,
+    labels: list[str] | None = None,
 ) -> tuple[tuple[int, int], list]:
     """Build one SEG per detection using combined mode (no contour splitting)."""
     shape_info = (height, width)
@@ -30,7 +31,7 @@ def build_detection_segs(
     masks_cpu = masks.detach().cpu()
     for i in range(len(masks_cpu)):
         mask_2d = make_2d_mask(masks_cpu[i])
-        dlabel = make_label(text_prompt, index=i)
+        dlabel = labels[i] if labels is not None else make_label(text_prompt, index=i)
         _, segs_inst = mask_to_segs(
             mask_2d,
             combined=True,
@@ -76,6 +77,7 @@ def build_overlapping_segs(
     width: int,
     height: int,
     crop_factor: float,
+    labels: list[str] | None = None,
 ) -> tuple[tuple[int, int], list]:
     """Group masks by pixel overlap (union-find) and merge each group into one SEG."""
     shape_info = (height, width)
@@ -118,7 +120,10 @@ def build_overlapping_segs(
         for idx in indices[1:]:
             merged = np.maximum(merged, binary_masks[idx].astype(np.float32))
 
-        if text_prompt and text_prompt.strip():
+        if labels is not None:
+            unique_prompts = sorted(set(labels[i] for i in indices))
+            glabel = " + ".join(unique_prompts)
+        elif text_prompt and text_prompt.strip():
             glabel = f"{text_prompt}_group_{'_'.join(str(i) for i in sorted(indices))}"
         else:
             glabel = f"group_{'_'.join(str(i) for i in sorted(indices))}"

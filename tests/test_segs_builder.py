@@ -90,3 +90,60 @@ def test_build_overlapping_segs_separates_disjoint(masks_3d) -> None:
 
     assert result[0] == (20, 20)
     assert len(result[1]) == 3
+
+
+def test_build_detection_segs_with_labels(masks_3d) -> None:
+    """Per-mask labels override text_prompt-based labelling."""
+    per_mask_labels = [f"prompt_{i}" for i in range(masks_3d.shape[0])]
+
+    result = build_detection_segs(
+        masks=masks_3d,
+        text_prompt="ignored",
+        width=20,
+        height=20,
+        crop_factor=1.5,
+        labels=per_mask_labels,
+    )
+
+    assert len(result[1]) == masks_3d.shape[0]
+    for seg, expected_label in zip(result[1], per_mask_labels):
+        assert seg.label == expected_label
+
+
+def test_build_detection_segs_labels_none_fallback(masks_3d) -> None:
+    """When labels is None, text_prompt-based labelling is used."""
+    result = build_detection_segs(
+        masks=masks_3d,
+        text_prompt="cat",
+        width=20,
+        height=20,
+        crop_factor=1.5,
+        labels=None,
+    )
+
+    for i, seg in enumerate(result[1]):
+        assert seg.label == f"cat_{i}"
+
+
+def test_build_overlapping_segs_with_labels(masks_3d) -> None:
+    """Overlapping group labels derive from per-mask labels when provided."""
+    masks = masks_3d.clone()
+    masks[:, :, :] = 0.0
+    masks[0, 2:10, 2:10] = 1.0
+    masks[1, 6:14, 6:14] = 1.0
+    masks[2, 15:19, 15:19] = 1.0
+    per_mask_labels = ["cat", "cat", "dog"]
+
+    result = build_overlapping_segs(
+        masks=masks,
+        text_prompt="ignored",
+        width=20,
+        height=20,
+        crop_factor=1.5,
+        labels=per_mask_labels,
+    )
+
+    assert len(result[1]) == 2
+    group_labels = sorted(seg.label for seg in result[1])
+    assert "cat" in group_labels
+    assert "dog" in group_labels

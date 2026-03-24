@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 # Mode → set of pipeline keys to extract
@@ -71,3 +72,19 @@ def aggregate_prompts(
         )
 
     return all_prompts, all_labels
+
+
+def split_text_prompts(text_prompt: str) -> list[str]:
+    """Split a text prompt by uppercase ``OR`` separator into sub-prompts.
+
+    Only the exact uppercase token ``OR`` surrounded by whitespace is treated
+    as a separator.  Lowercase ``or`` is preserved as part of the prompt text.
+
+    Returns a list of stripped, non-empty sub-prompts.  An empty or
+    whitespace-only input returns an empty list.
+    """
+    if not text_prompt or not text_prompt.strip():
+        return []
+
+    parts = re.split(r"\bOR\b", text_prompt)
+    return [p.strip() for p in parts if p.strip()]

@@ -1,6 +1,11 @@
 import pytest
 
-from lib.prompt_handler import aggregate_prompts, extract_by_mode, valid_block
+from lib.prompt_handler import (
+    aggregate_prompts,
+    extract_by_mode,
+    split_text_prompts,
+    valid_block,
+)
 
 
 def _sample_pipeline() -> dict:
@@ -156,3 +161,63 @@ def test_aggregate_prompts_invalid_type() -> None:
             negative_block={"points": [[0.1, 0.1]], "labels": [0]},
             prompt_type="invalid",
         )
+
+
+def test_split_text_prompts_single() -> None:
+    """Single prompt without OR returns one-element list."""
+    assert split_text_prompts("cat") == ["cat"]
+
+
+def test_split_text_prompts_multiple() -> None:
+    """Uppercase OR splits into separate sub-prompts."""
+    assert split_text_prompts("cat OR dog OR person") == ["cat", "dog", "person"]
+
+
+def test_split_text_prompts_lowercase_preserved() -> None:
+    """Lowercase 'or' is NOT a separator and stays in the prompt text."""
+    assert split_text_prompts("black or white cat") == ["black or white cat"]
+
+
+def test_split_text_prompts_mixed_case_preserved() -> None:
+    """Mixed-case 'Or' is NOT a separator."""
+    assert split_text_prompts("cat Or dog") == ["cat Or dog"]
+
+
+def test_split_text_prompts_empty() -> None:
+    """Empty string returns empty list."""
+    assert split_text_prompts("") == []
+
+
+def test_split_text_prompts_whitespace_only() -> None:
+    """Whitespace-only string returns empty list."""
+    assert split_text_prompts("   ") == []
+
+
+def test_split_text_prompts_strips_whitespace() -> None:
+    """Leading/trailing whitespace around sub-prompts is stripped."""
+    assert split_text_prompts("  cat  OR  dog  ") == ["cat", "dog"]
+
+
+def test_split_text_prompts_extra_spaces_around_or() -> None:
+    """Multiple spaces around OR still split correctly."""
+    assert split_text_prompts("cat   OR   dog") == ["cat", "dog"]
+
+
+def test_split_text_prompts_trailing_or() -> None:
+    """Trailing OR produces no empty element."""
+    assert split_text_prompts("cat OR ") == ["cat"]
+
+
+def test_split_text_prompts_leading_or() -> None:
+    """Leading OR produces no empty element."""
+    assert split_text_prompts(" OR cat") == ["cat"]
+
+
+def test_split_text_prompts_consecutive_or() -> None:
+    """Consecutive OR tokens produce empty parts that get filtered out."""
+    assert split_text_prompts("cat OR OR dog") == ["cat", "dog"]
+
+
+def test_split_text_prompts_or_inside_phrase() -> None:
+    """OR preceded/followed by non-space is not a separator."""
+    assert split_text_prompts("ORcat OR dogOR") == ["ORcat", "dogOR"]

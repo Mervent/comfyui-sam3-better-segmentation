@@ -196,3 +196,54 @@ def run_sam3_inference(
         logger.debug(f"Output boxes shape: {boxes.shape}")
 
     return masks, boxes, scores
+
+
+_MultiResult = list[
+    tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, str]
+]
+
+
+def run_sam3_multi_inference(
+    sam3_model: dict,
+    pil_image,
+    confidence_threshold: float,
+    text_prompts: list[str],
+) -> _MultiResult:
+    """Run SAM3 inference once per text prompt, reusing the image backbone.
+
+    The expensive vision encoder (``set_image``) runs only once.  Each
+    sub-prompt then runs the lightweight text encoder + grounding decoder
+    via ``reset_all_prompts`` / ``set_text_prompt``.
+
+    Returns a list of ``(masks, boxes, scores, prompt_text)`` tuples — one
+    per sub-prompt.
+    """
+    ensure_model_on_device(sam3_model)
+    processor = sam3_model["processor"]
+
+    logger.info("Running multi-prompt segmentation (%d sub-prompts)", len(text_prompts))
+    logger.info("Confidence threshold: %s", confidence_threshold)
+    logger.info("Image size: %s", pil_image.size)
+
+    processor.set_confidence_threshold(confidence_threshold)
+    state = processor.set_image(pil_image)
+
+    results: _MultiResult = []
+    for prompt in text_prompts:
+        processor.reset_all_prompts(state)
+        stripped = prompt.strip()
+        if not stripped:
+            continue
+        logger.info("Multi-prompt: running sub-prompt '%s'", stripped)
+        state = processor.set_text_prompt(stripped, state)
+
+        masks = state.get("masks")
+        boxes = state.get("boxes")
+        scores = state.get("scores")
+
+        total = len(scores) if scores is not None else 0
+        logger.debug("Sub-prompt '%s': %d raw predictions", stripped, total)
+
+        results.append((masks, boxes, scores, stripped))
+
+    return results
